@@ -1,2 +1,7 @@
 streamlit-nightly
 pandas
+matplotlib
+scipy
+mne
+numpy
+pillow
