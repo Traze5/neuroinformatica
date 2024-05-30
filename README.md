@@ -1,19 +1,11 @@
-# :earth_americas: GDP Dash
+# Simulación de Modelos Neuronales
 
-A simple Streamlit app showing the GDP of different countries in the world.
+Una aplicación de Streamlit que simula diferentes modelos neuronales, incluyendo Hindmarsh-Rose, Hindmarsh-Rose Caótico, Izhikevich y Rulkov.
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://gdp-dashboard-template.streamlit.app/)
+## Cómo ejecutarlo en tu propia máquina
 
-### How to run it on your own machine
+### 1. Instalar los requisitos
 
-1. Install the requirements
+```sh
+pip install -r requirements.txt
 
-   ```
-   $ pip install -r requirements.txt
-   ```
-
-2. Run the app
-
-   ```
-   $ streamlit run streamlit_app.py
-   ```

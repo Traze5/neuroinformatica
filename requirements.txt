@@ -1,7 +1,6 @@
-streamlit-nightly
-pandas
-matplotlib
-scipy
-mne
+streamlit
+streamlit-option-menu
+plotly
 numpy
-pillow
+pandas
+
