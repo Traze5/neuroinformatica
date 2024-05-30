@@ -6,8 +6,12 @@
     "codespaces": {
       "openFiles": [
         "README.md",
-        "streamlit_app.py"
-      ]
+        "streamlit_app.py",
+        "Neu.py",
+        "Neu2.py",
+        "Neu3.py",
+        "Neu4.py"
+    ] 
     },
     "vscode": {
       "settings": {},
