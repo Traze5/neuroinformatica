@@ -23,9 +23,11 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Upload to Azure
-      uses: azure/webapps-deploy@v2
+    - name: 'Login via Azure CLI'
+      uses: azure/login@v1
       with:
-        app-name: 'Neuroinformatica'  # Reemplaza con el nombre de tu aplicación en Azure
-        slot-name: 'production'
-        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: 'Deploy to Azure WebApp'
+      run: |
+        az webapp up --name Neuroinformatica --resource-group tu-grupo-de-recursos --location eastus --runtime "PYTHON:3.8"
