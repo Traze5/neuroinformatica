@@ -100,7 +100,6 @@ if selected == "Modelo Rulkov":
     exec(open("neu4.py").read())
 
 # Página de contacto
-if selected == "About":
-    st.header('Miguel Angel Calderon',
-'Alvaro Alvarez', 'Alba Martinez', 'Runtian Wang')
-    st.write("Data Sciencist.")
+if selected == "Miguel Angel Calderón":
+    st.header("Miguel Angel Calderón")
+    st.write("Data Scientist.")
