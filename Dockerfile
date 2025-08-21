@@ -18,7 +18,7 @@ RUN useradd -m -u 1000 appuser
 
 # ---- Instalar dependencias Python primero (mejor cache) ----
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install -r requirements.txt && pip cache purge
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # ---- Copiar el resto del código ----
 COPY . $APP_HOME
