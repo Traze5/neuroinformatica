@@ -1,26 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-HINDMARSH–ROSE (3D) — 2 neuronas (HCO) + INVARIANTES (IDS)
-Sinapsis exactas según tus C/C++:
-  • Química (C++ exacta):  I_syn = -0.1 * (x_post - Esyn) / (1 + exp(sfast*(Vfast - x_pre)))
-  • Eléctrica (C++ exacta): I_el  =  0.05 * (x_pre - x_post)
-
-Integradores:
-  • LSODA (SciPy, por defecto) – rápido y estable para UI
-  • RK4 (NumPy)
-  • RK6 (C++ exacto) – Butcher como en tus fuentes (lento en Python, pero fiel)
-
-UI:
-  • Panorámica (envolventes min–max) o líneas decimadas (LTTB)
-  • Detalle de alta resolución
-  • Raster, fase, histogramas, IDS (dispersión+ajustes) y tablas
-  • Downsampling visual para no colgar la UI
-  • Tema Plotly Claro/Oscuro (fix: theme="streamlit" o None)
-
-Ejecuta:
-    streamlit run app_invariantes_hr.py
+Hindmarsh–Rose (3D) — 2 neuronas: sinapsis química y eléctrica, análisis de picos, ráfagas e invariantes (IDS).
+- Ecuaciones y parámetros exactamente como las fuentes originales.
+- Panorámica (envolventes o líneas decimadas), Detalle (alta resolución).
+- Raster, retratos de fase, histogramas, IDS y tablas.
+- Integradores: LSODA (por defecto), RK4, RK6.
+- Tema Plotly Claro/Oscuro corregido (Streamlit: theme='streamlit' o None).
 """
-from __future__ import annotations
 
 import numpy as np
 import pandas as pd
@@ -29,7 +15,7 @@ import streamlit as st
 from plotly import graph_objects as go
 from plotly.subplots import make_subplots
 
-# ------- SciPy opcional -------
+# --------- SciPy opcional ----------
 try:
     from scipy.integrate import odeint as _odeint
     from scipy.signal import find_peaks
@@ -50,37 +36,35 @@ except Exception:
             idx = np.array(sel)
         return idx, {"peak_heights": x[idx]}
 
-st.set_page_config(page_title="HR (C++ exacto) + IDS — Streamlit", layout="wide")
+st.set_page_config(page_title="Hindmarsh–Rose · Invariantes", layout="wide")
 
-# ================== Parámetros HR (C++) ==================
+# =============== Parámetros del modelo (idénticos a las fuentes) ===============
 @dataclass
-class HRPhys:
-    # Parámetros del C/C++
-    e: float   = 3.282
-    u: float   = 0.0021
-    s1: float  = 1.0
-    s2: float  = 1.0
-    v1: float  = 0.1
-    v2: float  = 0.1
-    # Química (C++ exacta)
-    Esyn: float  = -1.8
-    Vfast: float = -1.1
-    sfast: float = 0.2
+class HRParams:
+    e: float = 3.282     # corriente
+    u: float = 0.0021    # escala lenta
+    s1: float = 1.0
+    s2: float = 1.0
+    v1: float = 0.1
+    v2: float = 0.1
+    Esyn: float = -1.8   # potencial reversa inhibidor (química)
+    Vfast: float = -1.1  # umbral sigmoide (química)
+    sfast: float = 0.2   # pendiente sigmoide (química)
 
-# ================== RHS EXACTOS (C++) ==================
-def rhs_cpp_chemical(state, t, p: HRPhys):
+# =================== RHS: sinapsis química y eléctrica (exactos) ===================
+def rhs_quimica(state, t, p: HRParams):
     x1, y1, z1, x2, y2, z2 = state
-    s2 = 1.0 / (1.0 + np.exp(p.sfast*(p.Vfast - x2)))  # gating por x_pre
-    s1 = 1.0 / (1.0 + np.exp(p.sfast*(p.Vfast - x1)))
+    s2 = 1.0 / (1.0 + np.exp(p.sfast * (p.Vfast - x2)))  # gating por x_pre
+    s1 = 1.0 / (1.0 + np.exp(p.sfast * (p.Vfast - x1)))
     dx1 = y1 + 3.0*x1*x1 - x1*x1*x1 - z1 + p.e - 0.1*(x1 - p.Esyn)*s2
     dy1 = 1.0 - 5.0*x1*x1 - y1
     dz1 = p.u * (-p.v1*z1 + p.s1*(x1 + 1.6))
     dx2 = y2 + 3.0*x2*x2 - x2*x2*x2 - z2 + p.e - 0.1*(x2 - p.Esyn)*s1
     dy2 = 1.0 - 5.0*x2*x2 - y2
     dz2 = p.u * (-p.v2*z2 + p.s2*(x2 + 1.6))
-    return np.array([dx1,dy1,dz1, dx2,dy2,dz2], dtype=float)
+    return np.array([dx1, dy1, dz1, dx2, dy2, dz2], dtype=float)
 
-def rhs_cpp_electrical(state, t, p: HRPhys):
+def rhs_electrica(state, t, p: HRParams):
     x1, y1, z1, x2, y2, z2 = state
     dx1 = y1 + 3.0*x1*x1 - x1*x1*x1 - z1 + p.e + 0.05*(x1 - x2)
     dy1 = 1.0 - 5.0*x1*x1 - y1
@@ -88,14 +72,14 @@ def rhs_cpp_electrical(state, t, p: HRPhys):
     dx2 = y2 + 3.0*x2*x2 - x2*x2*x2 - z2 + p.e + 0.05*(x2 - x1)
     dy2 = 1.0 - 5.0*x2*x2 - y2
     dz2 = p.u * (-p.v2*z2 + p.s2*(x2 + 1.6))
-    return np.array([dx1,dy1,dz1, dx2,dy2,dz2], dtype=float)
+    return np.array([dx1, dy1, dz1, dx2, dy2, dz2], dtype=float)
 
-# ================== Integradores ==================
+# ========================= Integradores =========================
 def rk4_step(y, t, dt, f, *args):
     k1 = f(y, t, *args)
     k2 = f(y + 0.5*dt*k1, t + 0.5*dt, *args)
     k3 = f(y + 0.5*dt*k2, t + 0.5*dt, *args)
-    k4 = f(y + dt*k3,   t + dt,     *args)
+    k4 = f(y + dt*k3, t + dt, *args)
     return y + (dt/6.0)*(k1 + 2*k2 + 2*k3 + k4)
 
 def rk4(f, y0, t, *args):
@@ -106,36 +90,33 @@ def rk4(f, y0, t, *args):
         y[i+1] = rk4_step(y[i], t[i], dt, f, *args)
     return y
 
-def rk6_cpp(f, y0, t, *args):
-    """
-    RK6 con los coeficientes exactos de tu C (intey):
-      k0..k5 y combinación
-    NOTA: en Python es más lento; úsalo solo si quieres fidelidad 1:1.
-    """
-    y = np.zeros((len(t), len(y0)), dtype=float); y[0] = y0
+def rk6(f, y0, t, *args):
+    """RK6 con los coeficientes del integrador original."""
+    y = np.zeros((len(t), len(y0)), dtype=float)
+    y[0] = y0
     for i in range(len(t)-1):
         dt = t[i+1] - t[i]
         x = y[i]
-        k0 = dt * f(x,             t[i],             *args)
+        k0 = dt * f(x, t[i], *args)
         a  = x + 0.2*k0
-        k1 = dt * f(a,             t[i] + dt/5.0,    *args)
+        k1 = dt * f(a, t[i] + dt/5.0, *args)
         a  = x + 0.075*k0 + 0.225*k1
-        k2 = dt * f(a,             t[i] + 0.3*dt,    *args)
+        k2 = dt * f(a, t[i] + 0.3*dt, *args)
         a  = x + 0.3*k0 - 0.9*k1 + 1.2*k2
-        k3 = dt * f(a,             t[i] + 0.6*dt,    *args)
+        k3 = dt * f(a, t[i] + 0.6*dt, *args)
         a  = x + 0.075*k0 + 0.675*k1 - 0.6*k2 + 0.75*k3
-        k4 = dt * f(a,             t[i] + 0.9*dt,    *args)
+        k4 = dt * f(a, t[i] + 0.9*dt, *args)
         a  = x + 0.660493827160493*k0 + 2.5*k1 - 5.185185185185185*k2 \
                + 3.888888888888889*k3 - 0.864197530864197*k4
-        k5 = dt * f(a,             t[i] + dt,        *args)
+        k5 = dt * f(a, t[i] + dt, *args)
         y[i+1] = x + (0.098765432098765)*k0 + (0.396825396825396)*k2 \
                    + (0.231481481481481)*k3 + (0.308641975308641)*k4 \
                    - (0.035714285714285)*k5
     return y
 
-# ================== Utilidades análisis ==================
+# ==================== Utilidades de análisis/visual ====================
 def lttb_downsample(t, y, n_out=8000):
-    """Decimación LTTB aproximada para líneas (fluidez visual)."""
+    """Decimación aproximada LTTB para dibujar líneas largas sin congelar la UI."""
     t = np.asarray(t); y = np.asarray(y)
     n = len(t)
     if n_out >= n or n_out < 3:
@@ -155,7 +136,6 @@ def lttb_downsample(t, y, n_out=8000):
         t_next = t[t_next_start:t_next_end]
         y_next = y[t_next_start:t_next_end]
         ya = y[a]; ta = t[a]
-        # área aproximada
         area = np.abs((ta - t_next) * (y_bucket.mean() - ya) - (ya - y_next) * (t_bucket.mean() - ta))
         if area.size == 0:
             a = start
@@ -165,13 +145,13 @@ def lttb_downsample(t, y, n_out=8000):
     out_t[-1] = t[-1]; out_y[-1] = y[-1]
     return out_t, out_y
 
-def detect_spikes(t, x, thr=0.2, min_gap=0.010):
+def detect_spikes(t, x, thr=0.20, min_gap=0.010):
     dt = float(np.median(np.diff(t)))
     min_samples = max(1, int(np.ceil(min_gap/dt)))
     pk, _ = find_peaks(x, height=thr, distance=min_samples)
     return pk.astype(int)
 
-def detect_bursts(t, x, v_th=-0.6, min_on=0.10, min_off=0.05):
+def detect_bursts(t, x, v_th=-0.60, min_on=0.10, min_off=0.05):
     above = x > v_th
     bursts = []
     i = 1
@@ -218,62 +198,43 @@ def minmax_envelope(t, x, n_bins=2500):
     xmax = np.array([x[a:b].max() for a, b in zip(idx[:-1], idx[1:])])
     return tc, xmin, xmax
 
-# ================== Simulación segmentada + caché ==================
+# ===================== Simulación segmentada (cache) =====================
 @st.cache_data(show_spinner=False)
 def simulate_segment(mode: str, integrator: str, params: dict,
                      T0: float, T1: float, N: int, y0: np.ndarray):
-    """
-    mode: 'chem_cpp' | 'elec_cpp'
-    integrator: 'LSODA' | 'RK4' | 'RK6'
-    params: dict con HRPhys y opcionales (e, u, Esyn, Vfast, sfast)
-    """
-    p = HRPhys(**params)
+    p = HRParams(**params)
     t = np.linspace(float(T0), float(T1), int(N))
-    if mode == "chem_cpp":
-        f = rhs_cpp_chemical
-    else:
-        f = rhs_cpp_electrical
-
+    f = rhs_quimica if mode == "quimica" else rhs_electrica
     if integrator == "LSODA" and HAVE_SCIPY:
-        y = _odeint(lambda y,tt: f(y,tt,p), y0, t, atol=1e-6, rtol=1e-6)
+        sol = _odeint(lambda y,tt: f(y,tt,p), y0, t, atol=1e-6, rtol=1e-6)
     elif integrator == "RK6":
-        y = rk6_cpp(f, y0, t, p)
+        sol = rk6(f, y0, t, p)
     else:
-        y = rk4(f, y0, t, p)
-
+        sol = rk4(f, y0, t, p)
     mask = t >= 0.0
-    return t[mask], y[mask,:]
+    return t[mask], sol[mask,:]
 
-# ================== UI ==================
-st.title("Hindmarsh–Rose (C++ exacto) — invariantes y gráficas")
-st.caption("Sinapsis fieles a tus fuentes C/C++. Panorámica, detalle, raster, fase, histogramas e IDS.")
+# =============================== UI ======================================
+st.title("Hindmarsh–Rose (2 neuronas) — invariantes y gráficas")
 
 colA, colB, colC = st.columns([1.2,1.2,1.0])
 with colA:
-    mode_lbl = st.selectbox(
-        "Sinapsis",
-        ["Química (C++ exacta)","Eléctrica (C++ exacta)"],
-        index=0
-    )
-    mode = "chem_cpp" if mode_lbl.startswith("Química") else "elec_cpp"
+    modo_lbl = st.selectbox("Sinapsis", ["Química (sigmoide)", "Eléctrica (difusiva)"], index=0)
+    mode = "quimica" if modo_lbl.startswith("Química") else "electrica"
 with colB:
-    integrator_choice = st.radio(
-        "Integrador",
-        ["LSODA (SciPy)","RK4 (NumPy)","RK6 (C++ exacto)"],
-        index=0 if HAVE_SCIPY else 1, horizontal=True
-    )
-    integrator = "LSODA" if integrator_choice.startswith("LSODA") and HAVE_SCIPY else ("RK6" if "RK6" in integrator_choice else "RK4")
+    integ_lbl = st.radio("Integrador", ["LSODA (SciPy)","RK4 (NumPy)","RK6"], index=0 if HAVE_SCIPY else 1, horizontal=True)
+    integrator = "LSODA" if (integ_lbl.startswith("LSODA") and HAVE_SCIPY) else ("RK6" if "RK6" in integ_lbl else "RK4")
 with colC:
-    theme_choice = st.radio("Tema Plotly", ["Claro","Oscuro"], index=1, horizontal=True)
-    THEME_ARG = "streamlit" if theme_choice=="Claro" else None  # <-- FIX de Streamlit
-    TEMPLATE  = "plotly_white" if theme_choice=="Claro" else None
+    theme_lbl = st.radio("Tema Plotly", ["Claro","Oscuro"], index=1, horizontal=True)
+    THEME_ARG = "streamlit" if theme_lbl=="Claro" else None
+    TEMPLATE  = "plotly_white" if theme_lbl=="Claro" else None
 
-st.sidebar.header("Parámetros (C++)")
-e     = st.sidebar.slider("e (corriente)", 2.8, 3.5, 3.282, step=0.001)
-u     = st.sidebar.slider("u (lento)",    0.0008, 0.0040, 0.0021, step=0.0001, format="%.4f")
-Esyn  = st.sidebar.slider("Esyn", -3.0, 0.0, -1.8, step=0.1)
-Vfast = st.sidebar.slider("Vfast", -2.0, 1.0, -1.1, step=0.05)
-sfast = st.sidebar.slider("sfast", 0.05, 1.0, 0.20, step=0.05)
+st.sidebar.header("Parámetros del modelo")
+e     = st.sidebar.slider("e (corriente)", 2.8, 3.5, 3.282, 0.001)
+u     = st.sidebar.slider("u (lento)",     0.0008, 0.0040, 0.0021, 0.0001, format="%.4f")
+Esyn  = st.sidebar.slider("Esyn (química)", -3.0, 0.0, -1.8, 0.1)
+Vfast = st.sidebar.slider("Vfast (química)", -2.0, 1.0, -1.1, 0.05)
+sfast = st.sidebar.slider("sfast (química)", 0.05, 1.0, 0.20, 0.05)
 
 st.sidebar.header("Tiempo y resolución")
 T_over = st.sidebar.slider("T_over (s, panorámica)", 100.0, 15000.0, 3000.0, 50.0)
@@ -282,26 +243,26 @@ T_det  = st.sidebar.slider("T_detalle (s)", 20.0, 300.0, 80.0, 5.0)
 N_det  = st.sidebar.slider("N_det (puntos, detalle)", 20001, 1_000_000, 1_000_000, 10_000)
 
 st.sidebar.header("Detección")
-v_th   = st.sidebar.slider("v_th (bursts)", -1.2, -0.2, -0.60, 0.02)
-min_on = st.sidebar.slider("min ON burst (s)", 0.02, 0.40, 0.10, 0.01)
-min_off= st.sidebar.slider("min OFF burst (s)",0.01, 0.30, 0.05, 0.01)
-min_gap= st.sidebar.slider("min gap spike (s)", 0.004, 0.050, 0.010, 0.001)
+auto_vth = st.sidebar.checkbox("Umbral de ráfaga automático", value=False)
+v_th     = st.sidebar.slider("v_th (manual)", -3.0, 2.0, -0.60, 0.02)
+pk_thr   = st.sidebar.slider("Umbral de picos (x)", -2.0, 2.0, 0.20, 0.01)
+min_on   = st.sidebar.slider("Duración mínima ON (s)", 0.02, 0.40, 0.10, 0.01)
+min_off  = st.sidebar.slider("Duración mínima OFF (s)",0.01, 0.30, 0.05, 0.01)
+min_gap  = st.sidebar.slider("Separación mínima entre picos (s)", 0.004, 0.050, 0.010, 0.001, format="%.3f")
 
-# IC EXACTAS de tu C
+# Condiciones iniciales originales
 y0 = np.array([-0.915325, -3.208968, 3.350784, -1.307949, -7.580493, 3.068898], float)
-
-# ======== Simulación PANORÁMICA ========
 params = dict(e=e, u=u, Esyn=Esyn, Vfast=Vfast, sfast=sfast)
+
+# ===================== PANORÁMICA =====================
 T0_over = -min(1000.0, 0.2*T_over)
 tt_over, sol_over = simulate_segment(mode, integrator, params, T0_over, T_over, N_over, y0)
 x1_over, x2_over = sol_over[:,0], sol_over[:,3]
-
-nbins = int(min(3000, N_over//10))
-tc1, mn1, mx1 = minmax_envelope(tt_over, x1_over, n_bins=nbins)
-tc2, mn2, mx2 = minmax_envelope(tt_over, x2_over, n_bins=nbins)
+tc1, mn1, mx1 = minmax_envelope(tt_over, x1_over, n_bins=int(min(3000, N_over//10)))
+tc2, mn2, mx2 = minmax_envelope(tt_over, x2_over, n_bins=int(min(3000, N_over//10)))
 
 st.subheader("Vista panorámica")
-vista_over = st.radio("Modo de dibujo", ["Envolvente (rápida)","Líneas (decimadas)"], index=0, horizontal=True)
+vista_over = st.radio("Modo de dibujo", ["Envolvente (rápida)", "Líneas (decimadas)"], index=0, horizontal=True)
 
 if vista_over.startswith("Envolvente"):
     fig_over = go.Figure()
@@ -318,27 +279,33 @@ else:
     fig_over.add_trace(go.Scatter(x=tA, y=yA, mode='lines', name='x1'))
     fig_over.add_trace(go.Scatter(x=tB, y=yB, mode='lines', name='x2'))
 
-fig_over.update_layout(title=f"Panorámica — {mode_lbl}", xaxis_title="tiempo (s)", yaxis_title="x",
+fig_over.update_layout(title=f"Panorámica — {modo_lbl}", xaxis_title="tiempo (s)", yaxis_title="x",
                        height=320, margin=dict(l=10, r=10, b=10, t=50), template=TEMPLATE)
 st.plotly_chart(fig_over, use_container_width=True, theme=THEME_ARG)
 
-# ======== Simulación DETALLE ========
-T0_det = -min(300.0, 0.2*T_det)
-tt, sol = simulate_segment(mode, integrator, params, T0_det, T_det, N_det, y0)
+# ===================== DETALLE =====================
+use_over_final_as_ic = st.checkbox("Usar estado final de la panorámica como IC del detalle", value=True)
+y0_det = sol_over[-1, :].copy() if use_over_final_as_ic else y0
+
+T0_det = 0.0  # al heredar el estado final ya no necesitamos warm-up negativo
+tt, sol = simulate_segment(mode, integrator, params, T0_det, T_det, N_det, y0_det)
 x1, y1, z1, x2, y2, z2 = sol.T
 
-# Detección
-sp1 = detect_spikes(tt, x1, thr=0.20, min_gap=min_gap)
-sp2 = detect_spikes(tt, x2, thr=0.20, min_gap=min_gap)
-BA  = detect_bursts(tt, x1, v_th=v_th, min_on=min_on, min_off=min_off)
-BB  = detect_bursts(tt, x2, v_th=v_th, min_on=min_on, min_off=min_off)
+# Umbral de ráfaga efectivo
+v_th_eff = float(np.quantile(x1, 0.60)) if auto_vth else v_th
 
-# Downsampling visual
+# Detección picos/ráfagas
+sp1 = detect_spikes(tt, x1, thr=pk_thr, min_gap=min_gap)
+sp2 = detect_spikes(tt, x2, thr=pk_thr, min_gap=min_gap)
+BA  = detect_bursts(tt, x1, v_th=v_th_eff, min_on=min_on, min_off=min_off)
+BB  = detect_bursts(tt, x2, v_th=v_th_eff, min_on=min_on, min_off=min_off)
+
+# Downsample visual
 max_pts = 8000
 step_vis = max(1, int(len(tt)/max_pts))
 Tvis = tt[::step_vis]; X1vis = x1[::step_vis]; X2vis = x2[::step_vis]
 
-# ======== Tabs ========
+# ===================== TABS =====================
 tab_ts, tab_raster, tab_phase, tab_hist, tab_ids, tab_tables = st.tabs(
     ["Series temporales", "Raster de picos", "Fase (x–y)", "Histogramas", "IDS (invariantes)", "Tablas"]
 )
@@ -355,8 +322,8 @@ with tab_ts:
         fig_det.add_vline(x=off, line_dash='dot', opacity=0.35)
     if len(sp1): fig_det.add_trace(go.Scatter(x=tt[sp1], y=x1[sp1], mode='markers', marker=dict(size=5), name='picos A'))
     if len(sp2): fig_det.add_trace(go.Scatter(x=tt[sp2], y=x2[sp2], mode='markers', marker=dict(size=5), name='picos B'))
-    fig_det.add_hline(y=v_th, line_dash='dash', opacity=0.45)
-    fig_det.update_layout(title=f"Detalle — {mode_lbl} | integ={integrator_choice}",
+    fig_det.add_hline(y=v_th_eff, line_dash='dash', opacity=0.45)
+    fig_det.update_layout(title=f"Detalle — {modo_lbl} | integ={integ_lbl}",
                           xaxis_title="tiempo (s)", yaxis_title="x",
                           height=420, margin=dict(l=10, r=10, b=10, t=60), template=TEMPLATE)
     st.plotly_chart(fig_det, use_container_width=True, theme=THEME_ARG)
@@ -397,7 +364,7 @@ with tab_hist:
 with tab_ids:
     Iv = pair_intervals(BA, BB)
     if not Iv:
-        st.warning("No se emparejaron ciclos A→B→A. Ajusta e, u o la sinapsis.")
+        st.warning("No se emparejaron ciclos A→B→A. Ajusta e, u, la sinapsis o extiende T_over y usa su estado final como IC.")
     else:
         P, BAi, BBi, DAB, DBA = Iv["P"], Iv["BA"], Iv["BB"], Iv["D_AB"], Iv["D_BA"]
         def ttl(name, x, y):
@@ -441,4 +408,6 @@ with tab_tables:
         else:
             st.info("Sin secuencias A→B→A detectadas.")
 
-st.success(f"OK. Muestras detalle: {len(tt):,} | Integrador: {integrator_choice} | Downsample visual: {step_vis}×.")
+# Diagnóstico breve
+st.info(f"Detección — picos A={len(sp1)}, B={len(sp2)} | ráfagas A={len(BA)}, B={len(BB)} | v_th usado={v_th_eff:.3f}")
+st.success(f"Muestras detalle: {len(tt):,} | Integrador: {integ_lbl} | Downsample visual: {step_vis}×.")
