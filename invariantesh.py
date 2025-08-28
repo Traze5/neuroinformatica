@@ -1,388 +1,368 @@
-# app.py — Streamlit: Hindmarsh–Rose 2N (química / eléctrica) con invariantes y gráficos
-# Autor: tú + tu copiloto :D
-# Requisitos: streamlit, numpy, matplotlib
-# Ejecuta: streamlit run app.py
+# -*- coding: utf-8 -*-
+"""
+HINDMARSH–ROSE (3D) — 2 neuronas (HCO) + INVARIANTES (IDS)
+Sinapsis: Química (sigmoide) | Eléctrica (difusiva)
+Integrador por defecto: SciPy LSODA (rápido); fallback: RK4 (NumPy).
 
-import math
-from dataclasses import dataclass
-from typing import Tuple, Dict, Literal
+- Panorámica (envolventes min–max) + Detalle (alta resolución)
+- Raster de picos, retratos de fase, histogramas, IDS (invariantes) y tablas
+- Downsampling visual para fluidez (no afecta al análisis)
+- Caching de simulación
+
+Ejecuta:
+    streamlit run app_invariantes_hr.py
+"""
+from __future__ import annotations
 
 import numpy as np
+import pandas as pd
+from dataclasses import dataclass
 import streamlit as st
-import matplotlib.pyplot as plt
+from plotly import graph_objects as go
+from plotly.subplots import make_subplots
 
-# ===========================
-# Estilo general (matplotlib)
-# ===========================
-plt.rcParams.update({
-    "figure.figsize": (8.5, 4.8),
-    "axes.grid": True,
-    "grid.alpha": 0.25,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.titleweight": "bold",
-    "axes.labelsize": 11,
-    "axes.titlesize": 14,
-    "legend.frameon": False,
-    "lines.linewidth": 1.2,
-})
+# ------ SciPy opcional ------
+try:
+    from scipy.integrate import odeint as _odeint
+    from scipy.signal import find_peaks
+    HAVE_SCIPY = True
+except Exception:
+    HAVE_SCIPY = False
+    def find_peaks(x, height=None, distance=None):
+        x = np.asarray(x)
+        idx = np.where((x[1:-1] > x[:-2]) & (x[1:-1] > x[2:]))[0] + 1
+        if height is not None:
+            thr = height if np.isscalar(height) else height[0]
+            idx = idx[x[idx] >= thr]
+        if distance is not None and len(idx) > 1:
+            sel = [idx[0]]
+            for i in idx[1:]:
+                if i - sel[-1] >= distance:
+                    sel.append(i)
+            idx = np.array(sel)
+        return idx, {"peak_heights": x[idx]}
 
-# ===========================
-# Modelo Hindmarsh–Rose 2N
-# ===========================
+st.set_page_config(page_title="HR (HCO) + Invariantes — Streamlit", layout="wide")
+
+# ================== Modelo HR ==================
 @dataclass
 class HRParams:
-    # Parámetros del modelo
-    e: float = 3.282
-    u: float = 0.0021
-    s1: float = 1.0
-    s2: float = 1.0
-    v1: float = 0.1
-    v2: float = 0.1
+    e: float        # corriente
+    mu: float       # escala lenta
+    S: float = 1.0  # ganancia lenta (para emular C: S=1, v=0.1 ya absorbido en mu si deseas)
     # Sinapsis química
-    Esyn: float = -1.8
-    Vfast: float = -1.1
-    sfast: float = 0.2
-    # Integración
-    dt: float = 0.001
-    t0: float = 0.00005
+    theta: float = -0.25   # umbral sigmoide
+    ksig:  float = 10.0    # pendiente sigmoide
+    E_syn: float = -1.8    # potencial reversa inhibidor (≈ tu C)
+    # Acoplos
+    g_syn: float = 0.10    # fuerza sinapsis química (≈0.1 como en C con prefactor)
+    g_el:  float = 0.00    # fuerza sinapsis eléctrica
+    # Offset estándar HR
+    x0: float = 1.6        # término (x + 1.6)
 
-def rhs_chemical(x: np.ndarray, p: HRParams) -> np.ndarray:
-    """Acoplamiento químico: término sigmoide con Esyn, Vfast, sfast."""
-    x1, y1, z1, x2, y2, z2 = x
-    dx1 = y1 + 3.0*x1*x1 - x1*x1*x1 - z1 + p.e - 0.1*(x1 - p.Esyn) / (1.0 + np.exp(p.sfast*(p.Vfast - x2)))
-    dy1 = 1.0 - 5.0*x1*x1 - y1
-    dz1 = p.u * (-p.v1*z1 + p.s1*(x1 + 1.6))
+def sigm(x, th, k):
+    # Nota: tu C químico usa 1/(1 + exp(sfast*(Vfast - x))) → aquí parametrizamos genérico
+    return 1.0/(1.0 + np.exp(-k*(x - th)))
 
-    dx2 = y2 + 3.0*x2*x2 - x2*x2*x2 - z2 + p.e - 0.1*(x2 - p.Esyn) / (1.0 + np.exp(p.sfast*(p.Vfast - x1)))
-    dy2 = 1.0 - 5.0*x2*x2 - y2
-    dz2 = p.u * (-p.v2*z2 + p.s2*(x2 + 1.6))
-    return np.array([dx1, dy1, dz1, dx2, dy2, dz2], dtype=np.float64)
+def rhs_pair(state12, t, p1: HRParams, p2: HRParams, mode: str = "chemical"):
+    x1,y1,z1, x2,y2,z2 = state12
 
-def rhs_electrical(x: np.ndarray, p: HRParams) -> np.ndarray:
-    """Acoplamiento eléctrico: término difusivo lineal."""
-    x1, y1, z1, x2, y2, z2 = x
-    dx1 = y1 + 3.0*x1*x1 - x1*x1*x1 - z1 + p.e + 0.05*(x1 - x2)
-    dy1 = 1.0 - 5.0*x1*x1 - y1
-    dz1 = p.u * (-p.v1*z1 + p.s1*(x1 + 1.6))
+    # Sinapsis química
+    s1 = sigm(x1, p1.theta, p1.ksig)
+    s2 = sigm(x2, p2.theta, p2.ksig)
+    I_q1 = p1.g_syn * s2 * (p1.E_syn - x1) if mode == "chemical" else 0.0
+    I_q2 = p2.g_syn * s1 * (p2.E_syn - x2) if mode == "chemical" else 0.0
 
-    dx2 = y2 + 3.0*x2*x2 - x2*x2*x2 - z2 + p.e + 0.05*(x2 - x1)
-    dy2 = 1.0 - 5.0*x2*x2 - y2
-    dz2 = p.u * (-p.v2*z2 + p.s2*(x2 + 1.6))
-    return np.array([dx1, dy1, dz1, dx2, dy2, dz2], dtype=np.float64)
+    # Sinapsis eléctrica (difusiva)
+    I_e1 = p1.g_el * (x2 - x1) if mode == "electrical" else 0.0
+    I_e2 = p2.g_el * (x1 - x2) if mode == "electrical" else 0.0
 
-def rk6_step(x: np.ndarray, dt: float, f, p: HRParams) -> np.ndarray:
-    """Runge–Kutta de 6 etapas con coeficientes idénticos a tu C."""
-    k = np.zeros((6, x.size), dtype=np.float64)
-    k[0] = dt * f(x, p)
+    dx1 = y1 + 3*x1**2 - x1**3 - z1 + p1.e + I_q1 + I_e1
+    dy1 = 1 - 5*x1**2 - y1
+    dz1 = p1.mu * ( -z1 + p1.S*(x1 + p1.x0) )
 
-    a = x + 0.2*k[0]
-    k[1] = dt * f(a, p)
+    dx2 = y2 + 3*x2**2 - x2**3 - z2 + p2.e + I_q2 + I_e2
+    dy2 = 1 - 5*x2**2 - y2
+    dz2 = p2.mu * ( -z2 + p2.S*(x2 + p2.x0) )
 
-    a = x + 0.075*k[0] + 0.225*k[1]
-    k[2] = dt * f(a, p)
+    return np.array([dx1,dy1,dz1, dx2,dy2,dz2], dtype=float)
 
-    a = x + 0.3*k[0] - 0.9*k[1] + 1.2*k[2]
-    k[3] = dt * f(a, p)
+# ================== Integradores ==================
+def rk4_step(y, t, dt, f, *args):
+    k1 = f(y, t, *args)
+    k2 = f(y + 0.5*dt*k1, t + 0.5*dt, *args)
+    k3 = f(y + 0.5*dt*k2, t + 0.5*dt, *args)
+    k4 = f(y + dt*k3, t + dt, *args)
+    return y + (dt/6.0)*(k1 + 2*k2 + 2*k3 + k4)
 
-    a = x + 0.075*k[0] + 0.675*k[1] - 0.6*k[2] + 0.75*k[3]
-    k[4] = dt * f(a, p)
+def rk4(f, y0, t, *args):
+    y = np.zeros((len(t), len(y0)), dtype=float)
+    y[0] = y0
+    for i in range(len(t)-1):
+        dt = t[i+1] - t[i]
+        y[i+1] = rk4_step(y[i], t[i], dt, f, *args)
+    return y
 
-    a = x + 0.660493827160493*k[0] + 2.5*k[1] - 5.185185185185185*k[2] + 3.888888888888889*k[3] - 0.864197530864197*k[4]
-    k[5] = dt * f(a, p)
+# ================== Utilidades análisis ==================
+def detect_spikes(t, x, thr=0.2, min_gap=0.010):
+    dt = float(np.median(np.diff(t)))
+    min_samples = max(1, int(np.ceil(min_gap/dt)))
+    pk, _ = find_peaks(x, height=thr, distance=min_samples)
+    return pk.astype(int)
 
-    x_new = x + 0.098765432098765*k[0] + 0.396825396825396*k[2] + 0.231481481481481*k[3] + 0.308641975308641*k[4] - 0.035714285714285*k[5]
-    return x_new
+def detect_bursts(t, x, v_th=-0.6, min_on=0.10, min_off=0.05):
+    above = x > v_th
+    bursts = []
+    i = 1
+    while i < len(t):
+        while i < len(t) and not (above[i] and not above[i-1]):
+            i += 1
+        if i >= len(t): break
+        on = t[i]
+        while i < len(t) and not ((not above[i]) and above[i-1]):
+            i += 1
+        if i >= len(t): break
+        off = t[i]
+        if (off - on) >= min_on and (not bursts or (on - bursts[-1][1]) >= min_off):
+            bursts.append((on, off))
+    return bursts
 
-def simulate(
-    n_steps: int,
-    params: HRParams,
-    variant: Literal["chemical", "electrical"] = "chemical",
-    sample_every: int = 1,
-    record_pre_time: bool = False,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Simula y devuelve (t, Y) con columnas [x1,y1,z1,x2,y2,z2]."""
-    x = np.array([-0.915325, -3.208968, 3.350784, -1.307949, -7.580493, 3.068898], dtype=np.float64)
-    t = params.t0
-    dt = params.dt
+def pair_intervals(BA, BB):
+    out = {"P": [], "BA": [], "BB": [], "D_AB": [], "D_BA": []}
+    for i in range(len(BA)-1):
+        a_on, a_off = BA[i]
+        a_next_on   = BA[i+1][0]
+        cand = [b for b in BB if b[0] >= a_on and b[0] < a_next_on]
+        if not cand: continue
+        b_on, b_off = cand[0]
+        out["P"].append(a_next_on - a_on)
+        out["BA"].append(a_off - a_on)
+        out["BB"].append(b_off - b_on)
+        out["D_AB"].append(b_on - a_off)
+        out["D_BA"].append(a_next_on - b_off)
+    return {k: np.array(v, float) for k, v in out.items() if len(v) > 0}
 
-    f = rhs_chemical if variant == "chemical" else rhs_electrical
+def linfit(x, y):
+    if len(x) < 2: return np.nan, np.nan, np.nan
+    X = np.vstack([x, np.ones_like(x)]).T
+    m, q = np.linalg.lstsq(X, y, rcond=None)[0]
+    yhat = m*x + q
+    ss_res = np.sum((y - yhat)**2)
+    ss_tot = np.sum((y - np.mean(y))**2) + 1e-12
+    return float(m), float(q), float(1 - ss_res/ss_tot)
 
-    # Prealoca
-    n_store = n_steps // sample_every + int(n_steps % sample_every != 0)
-    t_out = np.zeros(n_store, dtype=np.float64)
-    y_out = np.zeros((n_store, 6), dtype=np.float64)
+def minmax_envelope(t, x, n_bins=2500):
+    n_bins = int(max(50, n_bins))
+    idx = np.linspace(0, len(x), n_bins+1, dtype=int)
+    tc  = 0.5*(t[idx[:-1]] + t[np.clip(idx[1:]-1, 0, len(t)-1)])
+    xmin = np.array([x[a:b].min() for a, b in zip(idx[:-1], idx[1:])])
+    xmax = np.array([x[a:b].max() for a, b in zip(idx[:-1], idx[1:])])
+    return tc, xmin, xmax
 
-    w = 0
-    serie = 0
-    for i in range(n_steps):
-        t_pre = t
-        x = rk6_step(x, dt, f, params)
-        t += dt
-
-        serie = (serie + 1) % sample_every
-        if serie == sample_every - 1:
-            t_out[w] = (t_pre if record_pre_time else t)
-            y_out[w] = x
-            w += 1
-
-    return t_out[:w], y_out[:w]
-
-# ===========================
-# Detección de picos e ISI
-# ===========================
-def detect_spikes(x: np.ndarray, t: np.ndarray, thr: float = 0.0) -> Tuple[np.ndarray, np.ndarray]:
-    """Detecta máximos locales por encima de umbral."""
-    if x.size < 3:
-        return np.array([]), np.array([])
-    left = x[1:-1] > x[:-2]
-    right = x[1:-1] > x[2:]
-    above = x[1:-1] > thr
-    idx = np.where(left & right & above)[0] + 1
-    return t[idx], idx
-
-def isi_stats(t_spk: np.ndarray) -> Dict[str, float]:
-    if t_spk.size < 2:
-        return {k: np.nan for k in ["n_spikes","rate_hz","mean","std","cv","median","q25","q75","skew","kurt"]}
-    isi = np.diff(t_spk)
-    n_spikes = int(t_spk.size)
-    duration = t_spk[-1] - t_spk[0]
-    rate_hz = (n_spikes - 1) / duration if duration > 0 else np.nan
-    mean = float(np.mean(isi))
-    std = float(np.std(isi, ddof=1)) if isi.size > 1 else 0.0
-    cv = std / mean if mean > 0 else np.nan
-    median = float(np.median(isi))
-    q25, q75 = float(np.percentile(isi, 25)), float(np.percentile(isi, 75))
-    # Asimetría y curtosis (exceso)
-    m = isi - mean
-    m2 = np.mean(m**2)
-    m3 = np.mean(m**3)
-    m4 = np.mean(m**4)
-    skew = m3 / (m2**1.5 + 1e-12)
-    kurt = m4 / (m2**2 + 1e-12) - 3.0
-    return dict(n_spikes=n_spikes, rate_hz=rate_hz, mean=mean, std=std, cv=cv,
-                median=median, q25=q25, q75=q75, skew=float(skew), kurt=float(kurt))
-
-def return_map(arr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    return (arr[:-1], arr[1:]) if arr.size >= 2 else (np.array([]), np.array([]))
-
-# ===========================
-# Correlación cruzada
-# ===========================
-def xcorr(a: np.ndarray, b: np.ndarray, max_lag_s: float, dt: float, decim: int = 1) -> Tuple[np.ndarray, np.ndarray]:
-    """Correlación cruzada normalizada de series (con decimación opcional)."""
-    if decim > 1:
-        a = a[::decim]
-        b = b[::decim]
-        dt = dt * decim
-    a = (a - a.mean()) / (a.std() + 1e-12)
-    b = (b - b.mean()) / (b.std() + 1e-12)
-    n = len(a)
-    max_lag = int(max_lag_s / dt)
-    # correlación por FFT sería más eficiente, pero para tamaños moderados esto basta
-    corr_full = np.correlate(a, b, mode="full") / max(1, n)
-    lags = np.arange(-n + 1, n)
-    mask = (lags >= -max_lag) & (lags <= max_lag)
-    return lags[mask] * dt, corr_full[mask]
-
-# ===========================
-# Streamlit UI
-# ===========================
-st.set_page_config(page_title="Hindmarsh–Rose 2N • Invariantes", layout="wide")
-
-st.title("Hindmarsh–Rose (2 neuronas) — invariantes y gráficas")
-st.caption("Selección de sinapsis, simulación con RK6, detección de picos, ISI, mapas de retorno y correlación cruzada.")
-
-with st.sidebar:
-    st.header("Parámetros")
-    variant = st.selectbox("Sinapsis", ["chemical", "electrical"], format_func=lambda s: "Química (sigmoide)" if s=="chemical" else "Eléctrica (difusiva)")
-    n_steps = st.slider("Pasos de integración (dt=0.001 s)", min_value=20_000, max_value=600_000, value=200_000, step=10_000)
-    sample_every = st.selectbox("Guardar cada (decimación para series)", [1, 2, 5, 10], index=0, help="1 = guardar todo; >1 reduce tamaño/tiempo de gráficos.")
-    thr_method = st.selectbox("Umbral de picos", ["0.0 (fijo)", "media + 0.5·std", "mediana"], index=0)
-    max_lag_s = st.slider("Máx. retardo para xcorr (s)", 0.1, 5.0, 2.0, 0.1)
-    xcorr_decim = st.selectbox("Decimación para xcorr", [1, 2, 5, 10], index=2)
-    do_zoom = st.checkbox("Mostrar zoom final (8 s)", value=True)
-    st.divider()
-    st.caption("IC y parámetros por defecto clonados del código C. Puedes ajustar si quieres:")
-    e_val = st.number_input("e (corriente)", value=3.282, step=0.01, format="%.3f")
-    u_val = st.number_input("u (lento)", value=0.0021, step=0.0001, format="%.4f")
-    Esyn_val = st.number_input("Esyn (química)", value=-1.8, step=0.1, format="%.1f")
-    Vfast_val = st.number_input("Vfast (química)", value=-1.1, step=0.1, format="%.1f")
-    sfast_val = st.number_input("sfast (química)", value=0.2, step=0.05, format="%.2f")
-    st.divider()
-    run_btn = st.button("🚀 Simular / Actualizar", type="primary", use_container_width=True)
-
-# Parámetros del modelo
-params = HRParams(e=e_val, u=u_val, Esyn=Esyn_val, Vfast=Vfast_val, sfast=sfast_val)
-
+# ================== Simulación segmentada + caché ==================
 @st.cache_data(show_spinner=False)
-def run_sim(n_steps: int, params: HRParams, variant: str, sample_every: int):
-    # Guardamos todo para análisis fino; record_pre_time=False (solo relevante si quisieras clonar .out del C)
-    return simulate(n_steps=n_steps, params=params, variant=variant, sample_every=sample_every, record_pre_time=False)
+def simulate_segment(e1, e2, mu, S, g_syn, g_el, theta, ksig, E_syn,
+                     T0, T1, N, y0, mode="chemical", integrator="LSODA", have_scipy=True):
+    p1 = HRParams(e=float(e1), mu=float(mu), S=float(S), g_syn=float(g_syn), g_el=float(g_el),
+                  theta=float(theta), ksig=float(ksig), E_syn=float(E_syn))
+    p2 = HRParams(e=float(e2), mu=float(mu), S=float(S), g_syn=float(g_syn), g_el=float(g_el),
+                  theta=float(theta), ksig=float(ksig), E_syn=float(E_syn))
+    t = np.linspace(float(T0), float(T1), int(N))
+    if integrator == "LSODA" and have_scipy:
+        sol = _odeint(lambda y,tt: rhs_pair(y,tt,p1,p2,mode), y0, t, atol=1e-6, rtol=1e-6)
+    else:
+        sol = rk4(lambda y,tt,pp1,pp2,md: rhs_pair(y,tt,pp1,pp2,md), y0, t, p1, p2, mode)
+    mask = t >= 0.0
+    return t[mask], sol[mask,:]
 
-if run_btn or "last_run" not in st.session_state:
-    t, Y = run_sim(n_steps, params, variant, sample_every)
-    st.session_state["t"] = t
-    st.session_state["Y"] = Y
-    st.session_state["last_run"] = True
+# ================== UI ==================
+st.title("Hindmarsh–Rose (2 neuronas) — invariantes y gráficas")
+st.caption("Panorámica (envolventes), detalle de alta resolución, raster de picos, hist/IDS y tablas.")
 
-t = st.session_state["t"]
-Y = st.session_state["Y"]
-dt_eff = params.dt * sample_every
+colA, colB, colC = st.columns([1.2,1.2,1.0])
+with colA:
+    mode = st.selectbox("Sinapsis", ["chemical","electrical"], format_func=lambda s: "Química (sigmoide)" if s=="chemical" else "Eléctrica (difusiva)")
+with colB:
+    integrator_choice = st.radio("Integrador", ["LSODA (SciPy)","RK4 (NumPy)"], index=0 if HAVE_SCIPY else 1, horizontal=True)
+    integrator = "LSODA" if integrator_choice.startswith("LSODA") and HAVE_SCIPY else "RK4"
+with colC:
+    theme = st.radio("Tema Plotly", ["Claro","Oscuro"], index=1, horizontal=True)
+    PLOTLY_THEME = None if theme=="Oscuro" else "plotly"
 
-x1, y1, z1, x2, y2, z2 = Y[:,0], Y[:,1], Y[:,2], Y[:,3], Y[:,4], Y[:,5]
+st.sidebar.header("Parámetros de modelo")
+# Defaults diseñados para emular el C químico inhibidor y/o eléctrica estable
+e1 = st.sidebar.slider("I1 (e1)", 2.8, 3.4, 3.282, step=0.001)
+e2 = st.sidebar.slider("I2 (e2)", 2.8, 3.4, 3.282, step=0.001)
+mu = st.sidebar.slider("μ (lento)", 0.0008, 0.0040, 0.0021, step=0.0001, format="%.4f")
+S  = st.sidebar.slider("S (ganancia lenta)", 0.5, 5.0, 1.0, step=0.1)
 
-# Umbral de picos
-if thr_method.startswith("0.0"):
-    thr = 0.0
-elif "media" in thr_method:
-    thr = float(np.mean(x1)) + 0.5*float(np.std(x1))
-else:
-    thr = float(np.median(x1))
+st.sidebar.subheader("Acoplos")
+g_syn = st.sidebar.slider("g_syn (química)", 0.0, 1.0, 0.10, step=0.01)
+g_el  = st.sidebar.slider("g_el (eléctrica)", 0.0, 0.5, 0.00, step=0.01)
 
-# Detectar picos e ISI
-t_sp1, idx1 = detect_spikes(x1, t, thr=thr)
-t_sp2, idx2 = detect_spikes(x2, t, thr=thr)
-isi1 = np.diff(t_sp1) if t_sp1.size > 1 else np.array([])
-isi2 = np.diff(t_sp2) if t_sp2.size > 1 else np.array([])
-stats1 = isi_stats(t_sp1)
-stats2 = isi_stats(t_sp2)
+st.sidebar.subheader("Química (sigmoide)")
+theta = st.sidebar.slider("θ", -2.0, 1.0, -1.1, step=0.05)
+ksig  = st.sidebar.slider("k (pendiente)", 0.5, 20.0, 10.0, step=0.5)
+Esyn  = st.sidebar.slider("E_syn", -3.0, 0.0, -1.8, step=0.1)
 
-# ============
-# Layout tabs
-# ============
-tab_ts, tab_isi, tab_return, tab_phase, tab_xcorr, tab_stats = st.tabs(
-    ["Series temporales", "Histogramas ISI", "Mapas de retorno", "Retratos de fase", "Correlación cruzada", "Resumen estadístico"]
+st.sidebar.header("Tiempo y resolución")
+# Mantén el flujo de tu app: Over + Detalle. Por defecto, DET=1e6 (solicitado).
+T_over = st.sidebar.slider("T_over (s, panorámica)", 100.0, 15000.0, 3000.0, 50.0)
+N_over = st.sidebar.slider("N_over (puntos)", 2001, 80001, 30001, 2000)
+T_det  = st.sidebar.slider("T_detalle (s)", 20.0, 300.0, 80.0, 5.0)
+N_det  = st.sidebar.slider("N_det (puntos, detalle)", 20001, 1_000_000, 1_000_000, 10_000)
+
+st.sidebar.header("Detección")
+v_th   = st.sidebar.slider("v_th (bursts)", -1.2, -0.2, -0.60, 0.02)
+min_on = st.sidebar.slider("min ON burst (s)", 0.02, 0.40, 0.10, 0.01)
+min_off= st.sidebar.slider("min OFF burst (s)",0.01, 0.30, 0.05, 0.01)
+min_gap= st.sidebar.slider("min gap spike (s)", 0.004, 0.050, 0.010, 0.001)
+
+# IC
+y0 = np.array([-1.0, -9.5, 3.1, -1.3, -7.6, 3.0], float)
+
+# ======== Simulación: PANORÁMICA ========
+T0_over = -min(1000.0, 0.2*T_over)
+tt_over, sol_over = simulate_segment(
+    e1, e2, mu, S, g_syn, g_el, theta, ksig, Esyn, T0_over, T_over, N_over, y0,
+    mode=mode, integrator=integrator, have_scipy=HAVE_SCIPY,
+)
+x1_over, x2_over = sol_over[:,0], sol_over[:,3]
+nbins = int(min(3000, N_over//10))
+tc1, mn1, mx1 = minmax_envelope(tt_over, x1_over, n_bins=nbins)
+tc2, mn2, mx2 = minmax_envelope(tt_over, x2_over, n_bins=nbins)
+
+fig_over = go.Figure()
+fig_over.add_trace(go.Scatter(x=tc1, y=mx1, mode='lines', line=dict(width=0.5), showlegend=False))
+fig_over.add_trace(go.Scatter(x=tc1, y=mn1, mode='lines', fill='tonexty', name='A envolvente', opacity=0.60))
+fig_over.add_trace(go.Scatter(x=tc1, y=0.5*(mn1+mx1), mode='lines', name='A contorno', line=dict(width=1)))
+fig_over.add_trace(go.Scatter(x=tc2, y=mx2, mode='lines', line=dict(width=0.5), showlegend=False))
+fig_over.add_trace(go.Scatter(x=tc2, y=mn2, mode='lines', fill='tonexty', name='B envolvente', opacity=0.40))
+fig_over.add_trace(go.Scatter(x=tc2, y=0.5*(mn2+mx2), mode='lines', name='B contorno', line=dict(width=1)))
+fig_over.update_layout(title="Vista panorámica — envolventes min–max", xaxis_title="tiempo (s)", yaxis_title="x",
+                       height=320, margin=dict(l=10, r=10, b=10, t=50))
+st.plotly_chart(fig_over, use_container_width=True, theme=PLOTLY_THEME)
+
+# ======== Simulación: DETALLE (alta resolución, cacheada) ========
+T0_det = -min(300.0, 0.2*T_det)
+tt, sol = simulate_segment(
+    e1, e2, mu, S, g_syn, g_el, theta, ksig, Esyn, T0_det, T_det, N_det, y0,
+    mode=mode, integrator=integrator, have_scipy=HAVE_SCIPY,
+)
+x1, y1, z1, x2, y2, z2 = sol.T
+
+# Detección picos/bursts
+sp1 = detect_spikes(tt, x1, thr=0.20, min_gap=min_gap)
+sp2 = detect_spikes(tt, x2, thr=0.20, min_gap=min_gap)
+BA  = detect_bursts(tt, x1, v_th=v_th, min_on=min_on, min_off=min_off)
+BB  = detect_bursts(tt, x2, v_th=v_th, min_on=min_on, min_off=min_off)
+
+# Downsampling visual para no colgar la UI
+max_pts = 8000
+step_vis = max(1, int(len(tt)/max_pts))
+Tvis = tt[::step_vis]; X1vis = x1[::step_vis]; X2vis = x2[::step_vis]
+
+# ======== Tabs ========
+tab_ts, tab_raster, tab_phase, tab_hist, tab_ids, tab_tables = st.tabs(
+    ["Series temporales", "Raster de picos", "Fase (x–y)", "Histogramas", "IDS (invariantes)", "Tablas"]
 )
 
 with tab_ts:
-    c1, c2 = st.columns([2,1])
-    with c1:
-        fig, ax = plt.subplots()
-        ax.plot(t, x1, label="x1")
-        ax.plot(t, x2, label="x2")
-        # marcar picos (si hay)
-        if t_sp1.size:
-            ax.plot(t_sp1, x1[idx1], "o", ms=3, alpha=0.6, label="picos x1")
-        if t_sp2.size:
-            ax.plot(t_sp2, x2[idx2], "o", ms=3, alpha=0.6, label="picos x2")
-        ax.set_xlabel("Tiempo (s)"); ax.set_ylabel("x(t)")
-        ax.set_title(f"Series temporales — {variant}")
-        ax.legend(ncol=3, fontsize=9)
-        st.pyplot(fig, clear_figure=True)
+    fig_det = go.Figure()
+    fig_det.add_trace(go.Scatter(x=Tvis, y=X1vis, name='x1 (A)', mode='lines'))
+    fig_det.add_trace(go.Scatter(x=Tvis, y=X2vis, name='x2 (B)', mode='lines'))
+    for on, off in BA:
+        fig_det.add_vline(x=on, line_dash='dash', opacity=0.35)
+        fig_det.add_vline(x=off, line_dash='dash', opacity=0.35)
+    for on, off in BB:
+        fig_det.add_vline(x=on, line_dash='dot', opacity=0.35)
+        fig_det.add_vline(x=off, line_dash='dot', opacity=0.35)
+    if len(sp1): fig_det.add_trace(go.Scatter(x=tt[sp1], y=x1[sp1], mode='markers', marker=dict(size=5), name='picos A'))
+    if len(sp2): fig_det.add_trace(go.Scatter(x=tt[sp2], y=x2[sp2], mode='markers', marker=dict(size=5), name='picos B'))
+    fig_det.add_hline(y=v_th, line_dash='dash', opacity=0.45)
+    fig_det.update_layout(title=f"Detalle — {mode}", xaxis_title="tiempo (s)", yaxis_title="x",
+                          height=420, margin=dict(l=10, r=10, b=10, t=50))
+    st.plotly_chart(fig_det, use_container_width=True, theme=PLOTLY_THEME)
 
-        if do_zoom and t.size > 0:
-            fig2, ax2 = plt.subplots()
-            mask = t > (t[-1] - 8.0)
-            ax2.plot(t[mask], x1[mask], label="x1")
-            ax2.plot(t[mask], x2[mask], label="x2")
-            ax2.set_xlabel("Tiempo (s)"); ax2.set_ylabel("x(t)")
-            ax2.set_title("Zoom final (8 s)")
-            ax2.legend()
-            st.pyplot(fig2, clear_figure=True)
-
-    with c2:
-        fig3, ax3 = plt.subplots()
-        ax3.plot(t, z1, label="z1")
-        ax3.plot(t, z2, label="z2")
-        ax3.set_xlabel("Tiempo (s)"); ax3.set_ylabel("z(t)")
-        ax3.set_title("Variable lenta z(t)")
-        ax3.legend()
-        st.pyplot(fig3, clear_figure=True)
-
-with tab_isi:
-    c1, c2 = st.columns(2)
-    with c1:
-        fig, ax = plt.subplots()
-        if isi1.size:
-            ax.hist(isi1, bins=min(40, max(5, isi1.size//2)))
-        ax.set_xlabel("ISI N1 (s)"); ax.set_ylabel("Frecuencia")
-        ax.set_title("Histograma ISI — N1")
-        st.pyplot(fig, clear_figure=True)
-    with c2:
-        fig, ax = plt.subplots()
-        if isi2.size:
-            ax.hist(isi2, bins=min(40, max(5, isi2.size//2)))
-        ax.set_xlabel("ISI N2 (s)"); ax.set_ylabel("Frecuencia")
-        ax.set_title("Histograma ISI — N2")
-        st.pyplot(fig, clear_figure=True)
-
-with tab_return:
-    c1, c2 = st.columns(2)
-    Pn1, Pn1n = return_map(isi1)
-    Pn2, Pn2n = return_map(isi2)
-    with c1:
-        fig, ax = plt.subplots()
-        if Pn1.size:
-            ax.scatter(Pn1, Pn1n, s=14, alpha=0.9)
-            lims = [min(Pn1.min(), Pn1n.min()), max(Pn1.max(), Pn1n.max())]
-            ax.plot(lims, lims, "--", lw=1)  # y=x
-            ax.set_xlim(lims); ax.set_ylim(lims)
-        ax.set_xlabel(r"$P_n$ (s)"); ax.set_ylabel(r"$P_{n+1}$ (s)")
-        ax.set_title("Mapa de retorno — N1")
-        st.pyplot(fig, clear_figure=True)
-    with c2:
-        fig, ax = plt.subplots()
-        if Pn2.size:
-            ax.scatter(Pn2, Pn2n, s=14, alpha=0.9)
-            lims = [min(Pn2.min(), Pn2n.min()), max(Pn2.max(), Pn2n.max())]
-            ax.plot(lims, lims, "--", lw=1)
-            ax.set_xlim(lims); ax.set_ylim(lims)
-        ax.set_xlabel(r"$P_n$ (s)"); ax.set_ylabel(r"$P_{n+1}$ (s)")
-        ax.set_title("Mapa de retorno — N2")
-        st.pyplot(fig, clear_figure=True)
+with tab_raster:
+    fig_r = go.Figure()
+    fig_r.add_trace(go.Scatter(x=(tt[sp1] if len(sp1) else []), y=np.ones(len(sp1)), mode='markers', name='A'))
+    fig_r.add_trace(go.Scatter(x=(tt[sp2] if len(sp2) else []), y=np.zeros(len(sp2)), mode='markers', name='B'))
+    fig_r.update_layout(title="Raster de picos", xaxis_title="tiempo (s)",
+                        yaxis=dict(tickmode='array', tickvals=[0,1], ticktext=["B","A"]),
+                        height=260, margin=dict(l=10, r=10, b=10, t=50))
+    st.plotly_chart(fig_r, use_container_width=True, theme=PLOTLY_THEME)
 
 with tab_phase:
-    c1, c2 = st.columns(2)
+    figp = make_subplots(rows=1, cols=2, subplot_titles=("N1 (x–y)", "N2 (x–y)"))
+    figp.add_trace(go.Scatter(x=x1, y=y1, mode='lines', name='N1'), row=1, col=1)
+    figp.add_trace(go.Scatter(x=x2, y=y2, mode='lines', name='N2'), row=1, col=2)
+    figp.update_xaxes(title_text="x1", row=1, col=1); figp.update_yaxes(title_text="y1", row=1, col=1)
+    figp.update_xaxes(title_text="x2", row=1, col=2); figp.update_yaxes(title_text="y2", row=1, col=2)
+    figp.update_layout(height=360, title="Retratos de fase", showlegend=False, margin=dict(l=10, r=10, b=10, t=60))
+    st.plotly_chart(figp, use_container_width=True, theme=PLOTLY_THEME)
+
+with tab_hist:
+    fig_h = make_subplots(rows=1, cols=2, subplot_titles=("ISI — N1", "ISI — N2"))
+    if len(sp1) > 1:
+        isi1 = np.diff(tt[sp1])
+        fig_h.add_trace(go.Histogram(x=isi1, nbinsx=min(40, max(10, len(isi1)//2))), row=1, col=1)
+    if len(sp2) > 1:
+        isi2 = np.diff(tt[sp2])
+        fig_h.add_trace(go.Histogram(x=isi2, nbinsx=min(40, max(10, len(isi2)//2))), row=1, col=2)
+    fig_h.update_xaxes(title_text="ISI (s)", row=1, col=1); fig_h.update_yaxes(title_text="Frecuencia", row=1, col=1)
+    fig_h.update_xaxes(title_text="ISI (s)", row=1, col=2); fig_h.update_yaxes(title_text="Frecuencia", row=1, col=2)
+    fig_h.update_layout(height=360, title="Histogramas ISI", showlegend=False, bargap=0.05, margin=dict(l=10, r=10, b=10, t=60))
+    st.plotly_chart(fig_h, use_container_width=True, theme=PLOTLY_THEME)
+
+with tab_ids:
+    Iv = pair_intervals(BA, BB)
+    if not Iv:
+        st.warning("No se emparejaron ciclos A→B→A. Ajusta g_syn (0.25–0.40) y μ (0.0016–0.0024), o usa I2>I1.")
+    else:
+        P, BAi, BBi, DAB, DBA = Iv["P"], Iv["BA"], Iv["BB"], Iv["D_AB"], Iv["D_BA"]
+        def ttl(name, x, y):
+            m,q,r2 = linfit(x,y); return f"{name} | m={m:.3f}, q={q:.3f}, R²={r2:.3f}", (m,q,r2)
+        t1,s1 = ttl("BA vs P", P, BAi);  t2,s2 = ttl("BB vs P", P, BBi)
+        t3,s3 = ttl("D_AB vs P", P, DAB); t4,s4 = ttl("D_BA vs P", P, DBA)
+        t5,s5 = ttl("BA + D_AB vs P", P, BAi + DAB); t6,s6 = ttl("BB + D_BA vs P", P, BBi + DBA)
+
+        fig_cmp = make_subplots(rows=2, cols=3, subplot_titles=(t1,t2,t3,t4,t5,t6))
+        def scatter_fit(row,col,x,y,stats):
+            m,q,_ = stats; xx = np.linspace(np.min(x), np.max(x), 100)
+            fig_cmp.add_trace(go.Scatter(x=x,y=y,mode='markers'), row=row, col=col)
+            fig_cmp.add_trace(go.Scatter(x=xx,y=m*xx+q,mode='lines',showlegend=False), row=row, col=col)
+            fig_cmp.update_xaxes(title_text="P", row=row, col=col)
+            fig_cmp.update_yaxes(title_text="valor", row=row, col=col)
+        scatter_fit(1,1,P,BAi,s1); scatter_fit(1,2,P,BBi,s2); scatter_fit(1,3,P,DAB,s3)
+        scatter_fit(2,1,P,DBA,s4); scatter_fit(2,2,P,BAi+DAB,s5); scatter_fit(2,3,P,BBi+DBA,s6)
+        fig_cmp.update_layout(height=560, title="Comparativas IDS (dispersión + ajuste)",
+                              showlegend=False, margin=dict(l=10, r=10, b=10, t=60))
+        st.plotly_chart(fig_cmp, use_container_width=True, theme=PLOTLY_THEME)
+
+with tab_tables:
+    c1,c2,c3 = st.columns([1,1,1])
+    # Tablas de bursts (en índices temporales)
+    def bursts_df(name, B):
+        if not B: return pd.DataFrame(columns=["burst_start","burst_end","dur"])
+        arr = np.array(B)
+        return pd.DataFrame({"burst_start":arr[:,0],"burst_end":arr[:,1],"dur":arr[:,1]-arr[:,0]})
+    dfA = bursts_df("N1", BA); dfB = bursts_df("N2", BB)
     with c1:
-        fig, ax = plt.subplots()
-        ax.plot(x1, y1, lw=0.8)
-        ax.set_xlabel("x1"); ax.set_ylabel("y1")
-        ax.set_title("Retrato de fase N1 (x–y)")
-        st.pyplot(fig, clear_figure=True)
+        st.subheader("Intervalos N1")
+        st.dataframe(dfA, use_container_width=True, height=280)
     with c2:
-        fig, ax = plt.subplots()
-        ax.plot(x2, y2, lw=0.8)
-        ax.set_xlabel("x2"); ax.set_ylabel("y2")
-        ax.set_title("Retrato de fase N2 (x–y)")
-        st.pyplot(fig, clear_figure=True)
-
-with tab_xcorr:
-    # Correlación cruzada de x1 con x2
-    lags, corr = xcorr(x1, x2, max_lag_s=max_lag_s, dt=dt_eff, decim=xcorr_decim)
-    fig, ax = plt.subplots()
-    ax.plot(lags, corr)
-    ax.set_xlabel("Retardo (s)")
-    ax.set_ylabel("Correlación normalizada")
-    ax.set_title(f"Correlación cruzada x1–x2 (decim={xcorr_decim}×)")
-    st.pyplot(fig, clear_figure=True)
-
-with tab_stats:
-    c1, c2, c3 = st.columns([1.4, 1.4, 1.2])
-
-    def nice_stats_table(title, stats):
-        st.subheader(title)
-        st.write(
-            f"- **Spikes:** {stats['n_spikes']}"
-            f"\n- **Firing rate:** {stats['rate_hz']:.3f} Hz"
-            f"\n- **ISI mean ± std:** {stats['mean']:.4f} ± {stats['std']:.4f} s"
-            f"\n- **CV:** {stats['cv']:.3f}"
-            f"\n- **Mediana [Q25–Q75]:** {stats['median']:.4f} s [{stats['q25']:.4f}–{stats['q75']:.4f}]"
-            f"\n- **Asimetría (skew):** {stats['skew']:.3f}"
-            f"\n- **Curtosis (exceso):** {stats['kurt']:.3f}"
-        )
-
-    with c1:
-        nice_stats_table("N1 — Estadísticos ISI", stats1)
-    with c2:
-        nice_stats_table("N2 — Estadísticos ISI", stats2)
+        st.subheader("Intervalos N2")
+        st.dataframe(dfB, use_container_width=True, height=280)
     with c3:
-        st.subheader("Resumen simulación")
-        st.write(
-            f"- Variante: **{variant}**"
-            f"\n- Pasos: **{n_steps}** (dt={params.dt}s, decim={sample_every}× ⇒ dt_eff={dt_eff:.4f}s)"
-            f"\n- Duración: **{t[-1]-t[0]:.2f} s**"
-            f"\n- e={params.e}, u={params.u}, Esyn={params.Esyn}, Vfast={params.Vfast}, sfast={params.sfast}"
-        )
+        Iv = pair_intervals(BA, BB)
+        st.subheader("Secuencias (A ancla)")
+        if Iv:
+            dfIv = pd.DataFrame({
+                "P": Iv["P"], "BA": Iv["BA"], "BB": Iv["BB"], "D_AB": Iv["D_AB"], "D_BA": Iv["D_BA"]
+            })
+            st.dataframe(dfIv, use_container_width=True, height=280)
+        else:
+            st.info("Sin secuencias A→B→A detectadas.")
 
-st.success("Simulación completada. Ajusta parámetros en la barra lateral y vuelve a pulsar “Simular / Actualizar”.")
+st.success(f"OK. Integrador: {integrator}. Muestras detalle: {len(tt):,} (downsample visual: {step_vis}×).")
