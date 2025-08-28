@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 Hindmarsh–Rose (3D) — 2 neuronas
-Sinapsis química (inhibidora sigmoidal) y eléctrica (difusiva).
-Análisis de picos, ráfagas e invariantes (IDS) con métricas (m, q, R², RMSE, medias, SD, CV y fracciones normalizadas).
-Integradores: LSODA (por defecto), RK4, RK6 (coeficientes del integrador original).
+Sinapsis: Química (inhibidora sigmoidal; según C original) y Eléctrica (difusiva).
+Integradores: LSODA (SciPy), RK4 y RK6 (coeficientes del integrador original).
+Análisis: picos, ráfagas e invariantes (IDS) con métricas (m, q, R², RMSE, medias, SD, CV y fracciones normalizadas).
+
+Dependencias:
+    streamlit, numpy, plotly, pandas
+    scipy (opcional, recomendado para LSODA y find_peaks)
 
 Ejecutar:
     streamlit run invariantesh.py
@@ -12,6 +16,7 @@ Ejecutar:
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
+
 import streamlit as st
 from plotly import graph_objects as go
 from plotly.subplots import make_subplots
@@ -23,7 +28,6 @@ try:
     HAVE_SCIPY = True
 except Exception:
     HAVE_SCIPY = False
-
     def find_peaks(x, height=None, distance=None):
         """Fallback simple de picos (máximos locales) si no hay SciPy."""
         x = np.asarray(x, float)
@@ -58,7 +62,8 @@ class HRParams:
 # ============================ RHS ============================
 def rhs_quimica(state, t, p: HRParams):
     x1, y1, z1, x2, y2, z2 = state
-    s2 = 1.0 / (1.0 + np.exp(p.sfast * (p.Vfast - x2)))  # gating por x_pre
+    # gating sigmoidal exactamente como en el C: 1/(1+exp(sfast*(Vfast - x_pre)))
+    s2 = 1.0 / (1.0 + np.exp(p.sfast * (p.Vfast - x2)))
     s1 = 1.0 / (1.0 + np.exp(p.sfast * (p.Vfast - x1)))
     dx1 = y1 + 3.0*x1*x1 - x1*x1*x1 - z1 + p.e - 0.1*(x1 - p.Esyn)*s2
     dy1 = 1.0 - 5.0*x1*x1 - y1
@@ -93,7 +98,7 @@ def rk4(f, y0, t, *args):
     return y
 
 def rk6(f, y0, t, *args):
-    """RK6 con los coeficientes del integrador original."""
+    """RK6 con coeficientes del integrador original (C)."""
     y = np.zeros((len(t), len(y0)), float); y[0] = y0
     for i in range(len(t)-1):
         dt = t[i+1]-t[i]; x = y[i]
@@ -116,7 +121,7 @@ def rk6(f, y0, t, *args):
 
 # ==================== Utilidades de análisis/visual ====================
 def lttb_downsample(t, y, n_out=8000):
-    """Decimación aproximada LTTB para trazar líneas largas sin bloquear la UI."""
+    """Decimación aproximada para trazados largos (LTTB)."""
     t = np.asarray(t); y = np.asarray(y)
     n = len(t)
     if n_out >= n or n_out < 3:
@@ -130,6 +135,7 @@ def lttb_downsample(t, y, n_out=8000):
         s2 = int(np.floor(i * bucket)) + 1
         e2 = int(np.floor((i + 1) * bucket)) + 1; e2 = min(e2, n)
         ta = t[a]; ya = y[a]
+        # área del triángulo
         area = np.abs((ta - t[s2:e2]) * (y[s:e].mean() - ya) - (ya - y[s2:e2]) * (t[s:e].mean() - ta))
         a = s if area.size == 0 else s + int(np.argmax(area))
         out_t[i] = t[a]; out_y[i] = y[a]
@@ -144,7 +150,7 @@ def detect_spikes(t, x, thr=0.20, min_gap=0.010):
     return pk.astype(int)
 
 def detect_bursts(t, x, v_th=-0.60, min_on=0.10, min_off=0.05):
-    """Detección de ráfagas por cruce sobre v_th con duraciones mínimas."""
+    """Ráfagas por cruce sobre v_th con duraciones mínimas."""
     above = np.asarray(x) > v_th
     bursts = []; i = 1
     while i < len(t):
@@ -158,14 +164,44 @@ def detect_bursts(t, x, v_th=-0.60, min_on=0.10, min_off=0.05):
             bursts.append((on, off))
     return bursts
 
-def pair_intervals(BA, BB):
-    """Empareja ciclos A→B→A para extraer P, BA, BB, D_AB, D_BA."""
+# ---- Fallback robusto por picos/ISI (cuando el cruce falla) ----
+def auto_isi_thresholds(t, peaks):
+    """Umbrales automáticos para agrupar por ISI (en segundos)."""
+    if len(peaks) < 3:
+        return 0.06, 0.12
+    isi = np.diff(t[peaks])
+    base = np.percentile(isi, 30)  # ISI intra-ráfaga
+    isi_on  = 1.5 * float(base)    # seguir en la misma ráfaga
+    ibi_off = 3.0 * float(base)    # cortar ráfaga
+    return isi_on, ibi_off
+
+def bursts_from_peaks(t, peaks, isi_on, ibi_off, min_on=0.05):
+    """Agrupa picos en ráfagas usando ISI. Devuelve [(on, off), ...]."""
+    if len(peaks) < 2:
+        return []
+    tt = t[peaks]; isi = np.diff(tt)
+    bursts = []; start_idx = 0
+    for k in range(len(isi)):
+        if isi[k] > ibi_off:
+            on, off = tt[start_idx], tt[k]
+            if (off - on) >= min_on:
+                bursts.append((on, off))
+            start_idx = k + 1
+    on, off = tt[start_idx], tt[-1]
+    if (off - on) >= min_on:
+        bursts.append((on, off))
+    return bursts
+
+# ---- IDS ----
+def pair_intervals_anchor(A, B):
+    """Empareja ciclos con anclaje en A respecto a B: P, BA, BB, D_AB, D_BA."""
     out = {"P": [], "BA": [], "BB": [], "D_AB": [], "D_BA": []}
-    for i in range(len(BA)-1):
-        a_on, a_off = BA[i]
-        a_next_on   = BA[i+1][0]
-        cand = [b for b in BB if b[0] >= a_on and b[0] < a_next_on]
-        if not cand: continue
+    for i in range(len(A)-1):
+        a_on, a_off = A[i]
+        a_next_on   = A[i+1][0]
+        cand = [b for b in B if b[0] >= a_on and b[0] < a_next_on]
+        if not cand: 
+            continue
         b_on, b_off = cand[0]
         out["P"].append(a_next_on - a_on)
         out["BA"].append(a_off - a_on)
@@ -200,12 +236,12 @@ def ids_metrics(P, BAi, BBi, DAB, DBA):
         return dict(m=float(m), q=float(q), r2=float(r2), rmse=float(rmse))
 
     fits = {
-        "BA_vs_P":     _fit(P, BAi),
-        "BB_vs_P":     _fit(P, BBi),
-        "D_AB_vs_P":   _fit(P, DAB),
-        "D_BA_vs_P":   _fit(P, DBA),
-        "BA+D_AB_vs_P":_fit(P, BAi + DAB),
-        "BB+D_BA_vs_P":_fit(P, BBi + DBA),
+        "BA vs P":      _fit(P, BAi),
+        "BB vs P":      _fit(P, BBi),
+        "D_AB vs P":    _fit(P, DAB),
+        "D_BA vs P":    _fit(P, DBA),
+        "BA+D_AB vs P": _fit(P, BAi + DAB),
+        "BB+D_BA vs P": _fit(P, BBi + DBA),
     }
 
     def _stats(v):
@@ -292,7 +328,7 @@ st.sidebar.header("Vistas opcionales")
 show_phase = st.sidebar.checkbox("Mostrar retratos de fase", value=False)
 show_hist  = st.sidebar.checkbox("Mostrar histogramas ISI", value=False)
 
-# Condiciones iniciales (idénticas a las fuentes)
+# Condiciones iniciales (idénticas al C)
 y0 = np.array([-0.915325, -3.208968, 3.350784, -1.307949, -7.580493, 3.068898], float)
 params = dict(e=e, u=u, Esyn=Esyn, Vfast=Vfast, sfast=sfast)
 
@@ -322,23 +358,23 @@ else:
     fig_over.add_trace(go.Scatter(x=tB, y=yB, mode='lines', name='x2'))
 
 fig_over.update_layout(title=f"Panorámica — {modo_lbl}", xaxis_title="tiempo (s)", yaxis_title="x",
-                       height=320, margin=dict(l=10, r=10, b=10, t=50), template=TEMPLATE)
+                       height=320, margin=dict(l=10, r=10, b=10, t=50), template=TEMPLATE or None)
 st.plotly_chart(fig_over, use_container_width=True, theme=THEME_ARG)
 
 # ========================= DETALLE =========================
-# El detalle SIEMPRE parte del estado final de la panorámica (evita "vacíos")
+# El detalle parte del estado final de la panorámica
 y0_det = sol_over[-1, :].copy()
 T0_det = 0.0
 tt, sol = simulate_segment(mode, integrator, params, T0_det, T_det, N_det, y0_det)
 x1, y1, z1, x2, y2, z2 = sol.T
 
-# Umbrales robustos (por percentiles) si auto_vth
+# Umbrales robustos (percentiles) si auto_vth
 qA_lo, qA_hi = float(np.quantile(x1, 0.20)), float(np.quantile(x1, 0.90))
 qB_lo, qB_hi = float(np.quantile(x2, 0.20)), float(np.quantile(x2, 0.90))
 v_th_A = (qA_lo + 0.45*(qA_hi - qA_lo)) if auto_vth else v_th
 v_th_B = (qB_lo + 0.45*(qB_hi - qB_lo)) if auto_vth else v_th
 
-# Picos con fallback por señal
+# --- Picos (con fallback de umbral) ---
 def _peaks_with_fallback(x, thr, qlo, qhi):
     pk = detect_spikes(tt, x, thr=thr, min_gap=min_gap)
     if len(pk) < 3:
@@ -352,15 +388,21 @@ def _peaks_with_fallback(x, thr, qlo, qhi):
 sp1 = _peaks_with_fallback(x1, pk_thr, qA_lo, qA_hi)
 sp2 = _peaks_with_fallback(x2, pk_thr, qB_lo, qB_hi)
 
-# Ráfagas con fallback si auto_vth y no hay detecciones
+# --- Ráfagas por cruce (umbral robusto/manual) ---
 BA  = detect_bursts(tt, x1, v_th=v_th_A, min_on=min_on, min_off=min_off)
 BB  = detect_bursts(tt, x2, v_th=v_th_B, min_on=min_on, min_off=min_off)
-if (len(BA)==0 or len(BB)==0) and auto_vth:
-    v_th_A2 = qA_lo + 0.35*(qA_hi - qA_lo)
-    v_th_B2 = qB_lo + 0.35*(qB_hi - qB_lo)
-    BA  = BA or detect_bursts(tt, x1, v_th=v_th_A2, min_on=max(0.05, 0.8*min_on), min_off=min_off)
-    BB  = BB or detect_bursts(tt, x2, v_th=v_th_B2, min_on=max(0.05, 0.8*min_on), min_off=min_off)
-    st.warning("Fallback de ráfagas activado (umbral/duración ON relajados).")
+
+# --- Fallback por ISI si no se detectó nada en una neurona ---
+if len(BA) == 0 and len(sp1) >= 3:
+    on_thr, off_thr = auto_isi_thresholds(tt, sp1)
+    BA = bursts_from_peaks(tt, sp1, on_thr, off_thr, min_on=max(0.04, 0.8*min_on))
+    if len(BA):
+        st.warning("Ráfagas N1 obtenidas por ISI (fallback).")
+if len(BB) == 0 and len(sp2) >= 3:
+    on_thr, off_thr = auto_isi_thresholds(tt, sp2)
+    BB = bursts_from_peaks(tt, sp2, on_thr, off_thr, min_on=max(0.04, 0.8*min_on))
+    if len(BB):
+        st.warning("Ráfagas N2 obtenidas por ISI (fallback).")
 
 # Downsample visual para series
 max_pts = 8000
@@ -383,7 +425,7 @@ with tab_ts:
     fig_det.add_hline(y=v_th_A, line_dash='dash', opacity=0.45)
     fig_det.update_layout(title=f"Detalle — {modo_lbl} | integ={integ_lbl}",
                           xaxis_title="tiempo (s)", yaxis_title="x",
-                          height=420, margin=dict(l=10, r=10, b=10, t=60), template=TEMPLATE)
+                          height=420, margin=dict(l=10, r=10, b=10, t=60), template=TEMPLATE or None)
     st.plotly_chart(fig_det, use_container_width=True, theme=THEME_ARG)
 
 with tab_raster:
@@ -392,14 +434,20 @@ with tab_raster:
     fig_r.add_trace(go.Scatter(x=(tt[sp2] if len(sp2) else []), y=np.zeros(len(sp2)), mode='markers', name='B'))
     fig_r.update_layout(title="Raster de picos", xaxis_title="tiempo (s)",
                         yaxis=dict(tickmode='array', tickvals=[0,1], ticktext=["B","A"]),
-                        height=260, margin=dict(l=10, r=10, b=10, t=60), template=TEMPLATE)
+                        height=260, margin=dict(l=10, r=10, b=10, t=60), template=TEMPLATE or None)
     st.plotly_chart(fig_r, use_container_width=True, theme=THEME_ARG)
 
 with tab_ids:
-    Iv = pair_intervals(BA, BB)
+    # intentamos ambos anclajes y elegimos el que produzca más ciclos
+    IvA = pair_intervals_anchor(BA, BB) if (len(BA) and len(BB)) else {}
+    IvB = pair_intervals_anchor(BB, BA) if (len(BA) and len(BB)) else {}
+    candidates = [("A", IvA), ("B", IvB)]
+    anchor, Iv = max(candidates, key=lambda kv: len(kv[1].get("P", [])) if kv[1] else 0)
+
     if not Iv:
-        st.warning("No se emparejaron ciclos A→B→A. Aumenta T_over y/o usa umbral automático (o ajusta v_th).")
+        st.warning("No se emparejaron ciclos completos en la ventana de detalle. Ajusta umbrales o la ventana temporal.")
     else:
+        st.caption(f"Anclaje usado para IDS: **{anchor}**.")
         P, BAi, BBi, DAB, DBA = Iv["P"], Iv["BA"], Iv["BB"], Iv["D_AB"], Iv["D_BA"]
 
         # 1) Dispersión + ajustes (6 relaciones)
@@ -414,7 +462,7 @@ with tab_ids:
             fig_cmp.add_trace(go.Scatter(x=xx, y=m*xx+q, mode='lines', showlegend=False), row=r, col=c)
             fig_cmp.update_xaxes(title_text="P (s)", row=r, col=c); fig_cmp.update_yaxes(title_text="valor (s)", row=r, col=c)
         fig_cmp.update_layout(height=560, title="Comparativas IDS (dispersión + ajuste)",
-                              showlegend=False, margin=dict(l=10, r=10, b=10, t=60), template=TEMPLATE)
+                              showlegend=False, margin=dict(l=10, r=10, b=10, t=60), template=TEMPLATE or None)
         st.plotly_chart(fig_cmp, use_container_width=True, theme=THEME_ARG)
 
         # 2) Métricas
@@ -448,13 +496,16 @@ with tab_tables:
     with c2:
         st.subheader("Intervalos N2"); st.dataframe(dfB, use_container_width=True, height=280)
     with c3:
-        Iv = pair_intervals(BA, BB)
-        st.subheader("Secuencias (A ancla)")
+        IvA = pair_intervals_anchor(BA, BB) if (len(BA) and len(BB)) else {}
+        IvB = pair_intervals_anchor(BB, BA) if (len(BA) and len(BB)) else {}
+        anchor, Iv = max([("A", IvA), ("B", IvB)],
+                         key=lambda kv: len(kv[1].get("P", [])) if kv[1] else 0)
+        st.subheader(f"Secuencias (anclaje {anchor})")
         if Iv:
             dfIv = pd.DataFrame({"P":Iv["P"], "BA":Iv["BA"], "BB":Iv["BB"], "D_AB":Iv["D_AB"], "D_BA":Iv["D_BA"]})
             st.dataframe(dfIv, use_container_width=True, height=280)
         else:
-            st.info("Sin secuencias A→B→A detectadas.")
+            st.info("Sin secuencias completas en la ventana de detalle.")
 
 # ========================= Vistas opcionales =========================
 if show_phase:
@@ -464,7 +515,7 @@ if show_phase:
     figp.add_trace(go.Scatter(x=x2, y=y2, mode='lines', name='N2'), row=1, col=2)
     figp.update_xaxes(title_text="x1", row=1, col=1); figp.update_yaxes(title_text="y1", row=1, col=1)
     figp.update_xaxes(title_text="x2", row=1, col=2); figp.update_yaxes(title_text="y2", row=1, col=2)
-    figp.update_layout(height=360, showlegend=False, margin=dict(l=10, r=10, b=10, t=60), template=TEMPLATE)
+    figp.update_layout(height=360, showlegend=False, margin=dict(l=10, r=10, b=10, t=60), template=TEMPLATE or None)
     st.plotly_chart(figp, use_container_width=True, theme=THEME_ARG)
 
 if show_hist:
@@ -476,7 +527,7 @@ if show_hist:
         isi2 = np.diff(tt[sp2]); fig_h.add_trace(go.Histogram(x=isi2, nbinsx=min(40, max(10, len(isi2)//2))), row=1, col=2)
     fig_h.update_xaxes(title_text="ISI (s)", row=1, col=1); fig_h.update_yaxes(title_text="Frecuencia", row=1, col=1)
     fig_h.update_xaxes(title_text="ISI (s)", row=1, col=2); fig_h.update_yaxes(title_text="Frecuencia", row=1, col=2)
-    fig_h.update_layout(height=360, showlegend=False, bargap=0.05, margin=dict(l=10, r=10, b=10, t=60), template=TEMPLATE)
+    fig_h.update_layout(height=360, showlegend=False, bargap=0.05, margin=dict(l=10, r=10, b=10, t=60), template=TEMPLATE or None)
     st.plotly_chart(fig_h, use_container_width=True, theme=THEME_ARG)
 
 # ============================ Diagnóstico ============================
