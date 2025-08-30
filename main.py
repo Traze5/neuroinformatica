@@ -202,7 +202,7 @@ elif selected == "Modelo Hindmarsh–Rose":
 
 elif selected == "Modelo Izhikevich":
     st.header("Simulación del Modelo Izhikevich")
-    run_module("izh.py")   # cambia a "iz.py" si tu archivo se llama así
+    run_module("iz.py")   # cambia a "iz.py" si tu archivo se llama así
 
 elif selected == "Modelo Rulkov":
     st.header("Simulación del Modelo Rulkov")
@@ -219,3 +219,4 @@ elif selected == "Invariantes":
 elif selected == "Miguel Angel Calderón":
     st.header("Miguel Angel Calderón")
     st.write("Data Scientist.")
+
