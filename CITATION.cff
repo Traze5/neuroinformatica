@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "Si utilizas este software, cítalo con la referencia siguiente."
+title: "neuroinformatica: simulación neuronal e IDS en Streamlit"
+version: 0.1.0
+date-released: 2025-08-31
+authors:
+  - name: "Traze5"  # Opcional: usa given-names/family-names y ORCID si procede
+#  - family-names: Apellido
+#    given-names: Nombre
+#    orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/Traze5/neuroinformatica"
+license: "MIT"  # o la que uses en LICENSE
+# Sustituye el DOI tras publicar en Zenodo:
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.XXXXXXX"
+abstract: >
+  Herramienta cloud para simulación y visualización de actividad neuronal
+  (Hindmarsh–Rose, Rulkov, HH, Izhikevich) con extracción de IDS, panel
+  Streamlit y empaquetado reproducible (Docker).
+keywords:
+  - computational neuroscience
+  - Streamlit
+  - Hindmarsh–Rose
+  - Rulkov
+  - IDS
+  - FAIR
