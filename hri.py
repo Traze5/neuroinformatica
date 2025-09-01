@@ -313,7 +313,7 @@ with st.sidebar:
           "Química (núcleo C)":"quimica_cpp",
           "Eléctrica (difusiva)":"electrica"}[syn_mode]
 
-    nsteps=st.number_input("Nº de pasos (TIME)", min_value=100_000, value=90_000_000, step=1_000_000)
+    nsteps=st.number_input("Nº de pasos (TIME)", min_value=100_000, value=40_000_000, step=1_000_000)
     dt = st.number_input("dt (s)", min_value=0.0002, max_value=0.01, value=0.001, step=0.0002, format="%.4f")
     gamma = st.number_input("Escala temporal γ (solo visualización/métricas)", min_value=0.5, max_value=40.0, value=18.0, step=0.5)
     decim_plot=st.number_input("Decimación para dibujo (cada N pasos)", min_value=1, max_value=10_000, value=60, step=5)
