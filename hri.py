@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # HR (2 neuronas): ráfagas por ISI (eje X) + 1er/último spike + ciclos (paper) + tabla + pairplots
+# Integración: estricto (LSODA o RK4) según selección del usuario. Sin fallback.
 
 import numpy as np, pandas as pd, streamlit as st, warnings
 from dataclasses import dataclass
@@ -70,10 +71,13 @@ def rhs_hr(y, t, prm, mode, sc, cc, se):
     dz2 = prm.mu * (-prm.v2*z2 + prm.s2*(x2 + 1.6))
     return np.array([dx1,dy1,dz1, dx2,dy2,dz2], float)
 
-# ===== Integración (dos rejillas) =====
+# ===== Integración (estricta: sin fallback) =====
 @st.cache_data(show_spinner=False)
-def simulate(mode, prm_dict, sc_dict, cc_dict, se_dict,
-             y0, nsteps, dt, decim_plot, decim_evt, burn_in_s, use_lsoda=True):
+def simulate(method, mode, prm_dict, sc_dict, cc_dict, se_dict,
+             y0, nsteps, dt, decim_plot, decim_evt, burn_in_s):
+    """
+    method: 'LSODA' o 'RK4'. Sin fallback. Lanza RuntimeError si LSODA no está disponible o falla.
+    """
     prm = HRParams(**prm_dict); sc  = SynChemSigm(**sc_dict)
     cc  = SynChemCPP(**cc_dict); se  = SynElec(**se_dict)
     nsteps=int(nsteps); dt=float(dt)
@@ -95,16 +99,20 @@ def simulate(mode, prm_dict, sc_dict, cc_dict, se_dict,
             y[i+1]=y[i]+(h/6.0)*(k1+2*k2+2*k3+k4)
         return y
 
-    if use_lsoda and HAVE_SCIPY:
+    if method == "LSODA":
+        if not HAVE_SCIPY:
+            raise RuntimeError("LSODA no está disponible en este entorno.")
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", ODEintWarning)
                 sol_det=_odeint(_rhs,np.array(y0,float),t_det,atol=1e-6,rtol=1e-6,mxstep=50000)
-        except Exception:
-            warnings.warn("LSODA falló; uso RK4.")
-            sol_det=_rk4_on_grid(t_det)
-    else:
+        except Exception as e:
+            # sin fallback: propagamos el error
+            raise RuntimeError(f"LSODA falló: {e}") from e
+    elif method == "RK4":
         sol_det=_rk4_on_grid(t_det)
+    else:
+        raise ValueError("Método de integración desconocido.")
 
     # interpolación a la rejilla de dibujo
     def _interp_states(t_src, Y_src, t_dst):
@@ -136,8 +144,6 @@ def _parabolic_vertex(t_im1, t_i, t_ip1, y_im1, y_i, y_ip1):
     return float(t_peak), float(y_peak)
 
 def detect_spikes(t, x, v_floor=None, rel=0.35):
-    """Devuelve tiempos de picos > umbral adaptativo.
-       Umbral = max(v_floor, mediana + rel*(max-mediana))."""
     t=np.asarray(t); x=np.asarray(x)
     if t.size<3: return np.array([],float)
     d = np.diff(x)
@@ -156,7 +162,6 @@ def detect_spikes(t, x, v_floor=None, rel=0.35):
 
 # ===== Ráfagas por ISI (eje X) =====
 def bursts_from_spikes(spk_t, gap_factor=3.0, min_spikes=2, min_dur=0.02):
-    """Agrupa spikes si ISI <= gap_thr, donde gap_thr = gap_factor * ISI_intra (mediana de ISI cortos)."""
     spk_t = np.asarray(spk_t, float)
     if spk_t.size < max(2, min_spikes): return []
     isi = np.diff(spk_t)
@@ -169,13 +174,11 @@ def bursts_from_spikes(spk_t, gap_factor=3.0, min_spikes=2, min_dur=0.02):
     start_i=0
     for i in range(1, len(spk_t)):
         if (spk_t[i] - spk_t[i-1]) > gap_thr:
-            # cerrar burst [start_i .. i-1]
             if (i-1) - start_i + 1 >= min_spikes:
                 on = spk_t[start_i]; off = spk_t[i-1]
                 if (off - on) >= min_dur:
                     bursts.append((on, off))
             start_i = i
-    # último
     if (len(spk_t)-1) - start_i + 1 >= min_spikes:
         on = spk_t[start_i]; off = spk_t[-1]
         if (off - on) >= min_dur:
@@ -194,8 +197,8 @@ def build_cycles_Xleader(burstsX, burstsY, X_first, X_last, Y_first, Y_last, tmi
         burstsX=_crop(burstsX); burstsY=_crop(burstsY)
     if len(burstsX)<3 or len(burstsY)<2: return []
 
-    X_on  = np.array([on  for on,off in burstsX], float)   # 1er spike de cada ráfaga X
-    X_off = np.array([off for on,off in burstsX], float)   # último spike de cada ráfaga X
+    X_on  = np.array([on  for on,off in burstsX], float)
+    X_off = np.array([off for on,off in burstsX], float)
     Y_on  = np.array([on  for on,off in burstsY], float)
     Y_off = np.array([off for on,off in burstsY], float)
 
@@ -218,10 +221,8 @@ def build_cycles_Xleader(burstsX, burstsY, X_first, X_last, Y_first, Y_last, tmi
             if j1+1 < len(Y_on): j1 += 1
             else: continue
         cycles.append(dict(
-            # ráfagas (sombras)
             x_on0=x0, x_off0=xf0, x_on1=x1, x_off1=xf1, x_on2=x2,
             y0_on=Y_on[j0], y0_off=Y_off[j0], y1_on=Y_on[j1], y1_off=Y_off[j1],
-            # spikes equivalentes (coinciden con on/off)
             X1_first=X_on[i],   X1_last=X_off[i],
             X2_first=X_on[i+1], X2_last=X_off[i+1],
             Y1_first=Y_on[j0],  Y1_last=Y_off[j0],
@@ -357,7 +358,9 @@ with st.sidebar:
     min_burst_dur= st.number_input("Duración mínima de ráfaga (s)", value=0.02, step=0.01, format="%.2f")
 
     st.subheader("Integrador")
-    use_lsoda = st.radio("Método",["LSODA (recomendado)","RK4 (fallback)"],index=0,horizontal=True).startswith("LSODA")
+    method = st.radio("Método (sin fallback)",["LSODA","RK4"], index=0 if HAVE_SCIPY else 1, horizontal=True)
+    if method=="LSODA" and not HAVE_SCIPY:
+        st.warning("LSODA no está disponible; selecciona RK4 para continuar.")
 
 # Empaquetado
 prm_dict=dict(e1=float(e1),e2=float(e2),mu=float(mu),s1=float(s1),s2=float(s2),v1=float(v1),v2=float(v2))
@@ -368,11 +371,16 @@ cpp_par =dict(g_fast=float(locals().get("g_fast",0.10)),Esyn=float(locals().get(
 elec_par=dict(g_el=float(locals().get("g_el",0.0)))
 y0=np.array([-0.915325,-3.208968,3.350784,-1.307949,-7.580493,3.068898],float)
 
-# Simulación
-t_det, sol_det, t_disp, sol_disp = simulate(
-    mode,prm_dict,sigm_par,cpp_par,elec_par,
-    y0,int(nsteps),float(dt),int(decim_plot),int(decim_evt),float(burn_in_s),use_lsoda
-)
+# Simulación (estricta)
+try:
+    t_det, sol_det, t_disp, sol_disp = simulate(
+        method, mode,prm_dict,sigm_par,cpp_par,elec_par,
+        y0,int(nsteps),float(dt),int(decim_plot),int(decim_evt),float(burn_in_s)
+    )
+except RuntimeError as e:
+    st.error(str(e))
+    st.stop()
+
 x1_det, x2_det = sol_det[:,0], sol_det[:,3]
 x1, x2         = sol_disp[:,0], sol_disp[:,3]
 
@@ -396,27 +404,16 @@ st.header("Series temporales con 1er/último spike por ráfaga (detección por I
 fig_over=go.Figure()
 fig_over.add_trace(go.Scatter(x=t_disp_g,y=x1,name="X (N1)",line=dict(color=COL["X"],width=1.8)))
 fig_over.add_trace(go.Scatter(x=t_disp_g,y=x2,name="Y (N2)",line=dict(color=COL["Y"],width=1.8)))
-
-# sombreo de ráfagas
-for (a,b) in burstsX:
-    fig_over.add_vrect(x0=a/gamma, x1=b/gamma, fillcolor=COL["X"], opacity=0.10, line_width=0)
-for (a,b) in burstsY:
-    fig_over.add_vrect(x0=a/gamma, x1=b/gamma, fillcolor=COL["Y"], opacity=0.10, line_width=0)
-
-# marcadores 1er/último
-if X_first.size:
-    fig_over.add_trace(go.Scatter(x=X_first/gamma, y=np.interp(X_first,t_det,x1_det), mode="markers",
+for (a,b) in burstsX: fig_over.add_vrect(x0=a/gamma, x1=b/gamma, fillcolor=COL["X"], opacity=0.10, line_width=0)
+for (a,b) in burstsY: fig_over.add_vrect(x0=a/gamma, x1=b/gamma, fillcolor=COL["Y"], opacity=0.10, line_width=0)
+if X_first.size: fig_over.add_trace(go.Scatter(x=X_first/gamma, y=np.interp(X_first,t_det,x1_det), mode="markers",
                                   marker=dict(symbol="triangle-up", size=7, color="#FF9AA2"), name="X primer spike"))
-if X_last.size:
-    fig_over.add_trace(go.Scatter(x=X_last/gamma,  y=np.interp(X_last, t_det,x1_det), mode="markers",
+if X_last.size:  fig_over.add_trace(go.Scatter(x=X_last/gamma,  y=np.interp(X_last, t_det,x1_det), mode="markers",
                                   marker=dict(symbol="triangle-down", size=7, color="#C0392B"), name="X último spike"))
-if Y_first.size:
-    fig_over.add_trace(go.Scatter(x=Y_first/gamma, y=np.interp(Y_first,t_det,x2_det), mode="markers",
+if Y_first.size: fig_over.add_trace(go.Scatter(x=Y_first/gamma, y=np.interp(Y_first,t_det,x2_det), mode="markers",
                                   marker=dict(symbol="triangle-up", size=7, color="#9AD0FF"), name="Y primer spike"))
-if Y_last.size:
-    fig_over.add_trace(go.Scatter(x=Y_last/gamma,  y=np.interp(Y_last, t_det,x2_det), mode="markers",
+if Y_last.size:  fig_over.add_trace(go.Scatter(x=Y_last/gamma,  y=np.interp(Y_last, t_det,x2_det), mode="markers",
                                   marker=dict(symbol="triangle-down", size=7, color="#2162B0"), name="Y último spike"))
-
 fig_over.update_layout(height=330,xaxis_title="tiempo (s)",yaxis_title="x",
                        margin=dict(l=10,r=10,b=10,t=10),
                        legend=dict(orientation="h",yanchor="bottom",y=1.02,xanchor="right",x=1.0))
@@ -430,7 +427,6 @@ win_disp = st.slider("Selecciona ventana", min_value=t0, max_value=t1, value=(t0
                      step=step_slider, format="%.2f")
 win_phys = (win_disp[0]*gamma, win_disp[1]*gamma)
 
-# ciclos desde ráfagas por ISI
 cycles = build_cycles_Xleader(burstsX, burstsY, X_first, X_last, Y_first, Y_last,
                               tmin=win_phys[0], tmax=win_phys[1])
 
@@ -461,7 +457,6 @@ else:
     fig.add_trace(go.Scatter(x=t_disp_g[mm],y=x1[mm],name="X (N1)",line=dict(color=COL["X"],width=2.0)))
     fig.add_trace(go.Scatter(x=t_disp_g[mm],y=x2[mm],name="Y (N2)",line=dict(color=COL["Y"],width=2.0)))
 
-    # sombreado de ráfagas (1er→último spike)
     fig.add_vrect(x0=cyc["x_on0"],x1=cyc["x_off0"],fillcolor=COL["X"],opacity=0.16,line_width=0)
     fig.add_vrect(x0=cyc["y0_on"],x1=cyc["y0_off"],fillcolor=COL["Y"],opacity=0.16,line_width=0)
     fig.add_vrect(x0=cyc["x_on1"],x1=cyc["x_off1"],fillcolor=COL["X"],opacity=0.10,line_width=0)
@@ -477,11 +472,9 @@ else:
     _span(cyc["X1_first"], cyc["X2_first"], y_top+0.12*dy, f"Periodo X = {m['P_X']:.3f} s", COL["X"])
     _span(cyc["X1_last"],  cyc["X2_first"], y_top+0.06*dy, f"IBI X = {m['IBI_X']:.3f} s", COL["X"])
     _span(cyc["Y1_first"], cyc["Y2_first"], y_top+0.00*dy, f"Periodo Y = {m['P_Y']:.3f} s", COL["Y"])
-
     _span(cyc["Y1_first"], cyc["Y1_last"], yb-0.00*dy, f"Y burst = {m['B_Y']:.3f} s", COL["Y"])
     _span(cyc["Y1_first"], cyc["X2_first"], yb-0.06*dy, f"Y→X intervalo = {m['I_YX']:.3f} s", "#2C3E50")
     _span(cyc["Y1_last"],  cyc["X2_first"], yb-0.12*dy, f"Y→X retardo = {m['D_YX']:.3f} s", COL["NEU"])
-
     _span(cyc["X2_first"], cyc["X2_last"], yb-0.20*dy, f"X burst = {m['B_X']:.3f} s", COL["X"])
     _span(cyc["X2_first"], cyc["Y2_first"], yb-0.26*dy, f"X→Y intervalo = {m['I_XY']:.3f} s", "#2C3E50")
     _span(cyc["X2_last"],  cyc["Y2_first"], yb-0.32*dy, f"X→Y retardo = {m['D_XY']:.3f} s", COL["NEU"])
@@ -528,7 +521,7 @@ else:
     st.info("Se requieren al menos 4 ciclos para generar los cruces.")
 
 st.caption(f"Muestras (t/γ): {len(t_disp_g):,} | Ráfagas (ISI): X={len(burstsX)}, Y={len(burstsY)} | "
-           f"Ciclos: {len(cycles_disp)} | Integrador: {'LSODA' if locals().get('use_lsoda',True) else 'RK4'} | "
+           f"Ciclos: {len(cycles_disp)} | Integrador: {method} | "
            f"dt={float(locals().get('dt',0.001)):g}s | decimación dibujo={int(locals().get('decim_plot',60))}× | "
            f"muestreo detección={int(locals().get('decim_evt',60))}× (forzado ≤10) | γ={gamma:g} | "
            f"ventana=[{win_disp[0]:.2f}, {win_disp[1]:.2f}] s")
