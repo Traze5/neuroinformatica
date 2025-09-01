@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-# HR (2 neuronas): series + ciclos (paper, con 1er/último spike por cruces) + tabla + pairplots
+# HR (2 neuronas): ráfagas por ISI (eje X) + 1er/último spike + ciclos (paper) + tabla + pairplots
 
 import numpy as np, pandas as pd, streamlit as st, warnings
 from dataclasses import dataclass
 from plotly import graph_objects as go
 from plotly.subplots import make_subplots
 
-st.set_page_config(page_title="HR (2 neuronas) — invariantes y pairplots", layout="wide")
+st.set_page_config(page_title="HR (2 neuronas) — ráfagas por ISI", layout="wide")
 
 # ===== SciPy (LSODA) =====
 try:
@@ -42,7 +42,6 @@ class SynChemCPP:
 class SynElec:
     g_el:float=0.05
 
-# Micro-variabilidad lenta (ligera)
 DRIFT_A = 0.012
 DRIFT_T = 600.0
 
@@ -71,24 +70,28 @@ def rhs_hr(y, t, prm, mode, sc, cc, se):
     dz2 = prm.mu * (-prm.v2*z2 + prm.s2*(x2 + 1.6))
     return np.array([dx1,dy1,dz1, dx2,dy2,dz2], float)
 
-# ===== Integración =====
+# ===== Integración (dos rejillas) =====
 @st.cache_data(show_spinner=False)
 def simulate(mode, prm_dict, sc_dict, cc_dict, se_dict,
-             y0, nsteps, dt, decim_evt, burn_in_s, use_lsoda=True):
+             y0, nsteps, dt, decim_plot, decim_evt, burn_in_s, use_lsoda=True):
     prm = HRParams(**prm_dict); sc  = SynChemSigm(**sc_dict)
     cc  = SynChemCPP(**cc_dict); se  = SynElec(**se_dict)
-    nsteps=int(nsteps); dt=float(dt); step=int(max(1,decim_evt))
+    nsteps=int(nsteps); dt=float(dt)
+    step_plot=int(max(1, decim_plot))
+    step_det =int(max(1, min(int(decim_evt), 10)))  # detección no más gruesa que 10
+
     t_full=np.linspace(0.0,nsteps*dt,nsteps+1)
-    t_out=t_full[::step]  # malla de salida/detección
+    t_det =t_full[::step_det]
+    t_disp=t_full[::step_plot]
 
     def _rhs(Y, tt, prm=prm, mode=mode, sc=sc, cc=cc, se=se): return rhs_hr(Y, tt, prm, mode, sc, cc, se)
 
-    def _rk4_on_grid():
-        y=np.empty((len(t_out),len(y0)),float); y[0]=np.array(y0,float)
-        for i in range(len(t_out)-1):
-            h=t_out[i+1]-t_out[i]
-            k1=_rhs(y[i],t_out[i]); k2=_rhs(y[i]+0.5*h*k1,t_out[i]+0.5*h)
-            k3=_rhs(y[i]+0.5*h*k2,t_out[i]+0.5*h); k4=_rhs(y[i]+h*k3,t_out[i]+h)
+    def _rk4_on_grid(tgrid):
+        y=np.empty((len(tgrid),len(y0)),float); y[0]=np.array(y0,float)
+        for i in range(len(tgrid)-1):
+            h=tgrid[i+1]-tgrid[i]
+            k1=_rhs(y[i],tgrid[i]); k2=_rhs(y[i]+0.5*h*k1,tgrid[i]+0.5*h)
+            k3=_rhs(y[i]+0.5*h*k2,tgrid[i]+0.5*h); k4=_rhs(y[i]+h*k3,tgrid[i]+h)
             y[i+1]=y[i]+(h/6.0)*(k1+2*k2+2*k3+k4)
         return y
 
@@ -96,92 +99,91 @@ def simulate(mode, prm_dict, sc_dict, cc_dict, se_dict,
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", ODEintWarning)
-                sol_out=_odeint(_rhs,np.array(y0,float),t_out,atol=1e-6,rtol=1e-6,mxstep=50000)
+                sol_det=_odeint(_rhs,np.array(y0,float),t_det,atol=1e-6,rtol=1e-6,mxstep=50000)
         except Exception:
-            warnings.warn("LSODA falló; uso RK4 sobre la malla decimada.")
-            sol_out=_rk4_on_grid()
+            warnings.warn("LSODA falló; uso RK4.")
+            sol_det=_rk4_on_grid(t_det)
     else:
-        sol_out=_rk4_on_grid()
+        sol_det=_rk4_on_grid(t_det)
+
+    # interpolación a la rejilla de dibujo
+    def _interp_states(t_src, Y_src, t_dst):
+        out=np.empty((len(t_dst), Y_src.shape[1]), float)
+        for k in range(Y_src.shape[1]):
+            out[:,k]=np.interp(t_dst, t_src, Y_src[:,k])
+        return out
+    sol_disp = _interp_states(t_det, sol_det, t_disp)
 
     if burn_in_s>0:
-        skip=int(np.clip(np.floor(burn_in_s/(dt*step)),0,len(t_out)-2))
-        t_out=t_out[skip:]; sol_out=sol_out[skip:]
-    return t_out,sol_out
+        def _cut(tt,YY):
+            skip=int(np.clip(np.floor(burn_in_s/ (tt[1]-tt[0]+1e-12)),0,len(tt)-2))
+            return tt[skip:], YY[skip:]
+        t_det,  sol_det  = _cut(t_det,  sol_det)
+        t_disp, sol_disp = _cut(t_disp, sol_disp)
 
-# ===== Ráfagas (umbral bajo) =====
-def detect_bursts_interp(t,x,v_th=-0.60,min_on=0.10,min_off=0.05):
-    t=np.asarray(t); x=np.asarray(x); up=[]; dn=[]
-    for i in range(1,len(t)):
-        if x[i-1]<=v_th and x[i]>v_th:
-            frac=(v_th-x[i-1])/(x[i]-x[i-1]+1e-12); up.append(t[i-1]+frac*(t[i]-t[i-1]))
-        if x[i-1]>v_th and x[i]<=v_th:
-            frac=(v_th-x[i-1])/(x[i]-x[i-1]+1e-12); dn.append(t[i-1]+frac*(t[i]-t[i-1]))
-    bursts=[]; i=j=0; last_off=-1e9
-    while i<len(up) and j<len(dn):
-        if up[i]<=dn[j]:
-            on=up[i]
-            while j<len(dn) and (dn[j]-on)<min_on: j+=1
-            if j>=len(dn): break
-            off=dn[j]
-            if (on-last_off)>=min_off: bursts.append((on,off)); last_off=off
-            i+=1; j+=1
-        else: j+=1
+    return t_det, sol_det, t_disp, sol_disp
+
+# ===== Spikes (máximos locales con vértice parabólico) =====
+def _parabolic_vertex(t_im1, t_i, t_ip1, y_im1, y_i, y_ip1):
+    dt = (t_ip1 - t_im1) / 2.0
+    denom = (y_im1 - 2*y_i + y_ip1)
+    if abs(denom) < 1e-12:
+        return t_i, y_i
+    delta = 0.5*(y_im1 - y_ip1)/denom
+    delta = np.clip(delta, -1.0, 1.0)
+    t_peak = t_i + delta*dt
+    y_peak = y_i - 0.25*(y_im1 - y_ip1)*delta
+    return float(t_peak), float(y_peak)
+
+def detect_spikes(t, x, v_floor=None, rel=0.35):
+    """Devuelve tiempos de picos > umbral adaptativo.
+       Umbral = max(v_floor, mediana + rel*(max-mediana))."""
+    t=np.asarray(t); x=np.asarray(x)
+    if t.size<3: return np.array([],float)
+    d = np.diff(x)
+    idx = np.where((d[:-1]>0) & (d[1:]<=0))[0] + 1
+    if idx.size==0: return np.array([],float)
+    xm = float(np.median(x)); xM = float(np.max(x))
+    thr = xm + rel*(xM - xm)
+    if v_floor is not None: thr = max(thr, float(v_floor))
+    out=[]
+    for i in idx:
+        if i-1<0 or i+1>=len(x): continue
+        if x[i] < thr: continue
+        tp, _ = _parabolic_vertex(t[i-1], t[i], t[i+1], x[i-1], x[i], x[i+1])
+        out.append(tp)
+    return np.array(out,float)
+
+# ===== Ráfagas por ISI (eje X) =====
+def bursts_from_spikes(spk_t, gap_factor=3.0, min_spikes=2, min_dur=0.02):
+    """Agrupa spikes si ISI <= gap_thr, donde gap_thr = gap_factor * ISI_intra (mediana de ISI cortos)."""
+    spk_t = np.asarray(spk_t, float)
+    if spk_t.size < max(2, min_spikes): return []
+    isi = np.diff(spk_t)
+    if isi.size == 0: return []
+    med = np.median(isi)
+    intra = np.median(isi[isi <= med]) if np.any(isi <= med) else med
+    gap_thr = float(intra * gap_factor)
+
+    bursts=[]
+    start_i=0
+    for i in range(1, len(spk_t)):
+        if (spk_t[i] - spk_t[i-1]) > gap_thr:
+            # cerrar burst [start_i .. i-1]
+            if (i-1) - start_i + 1 >= min_spikes:
+                on = spk_t[start_i]; off = spk_t[i-1]
+                if (off - on) >= min_dur:
+                    bursts.append((on, off))
+            start_i = i
+    # último
+    if (len(spk_t)-1) - start_i + 1 >= min_spikes:
+        on = spk_t[start_i]; off = spk_t[-1]
+        if (off - on) >= min_dur:
+            bursts.append((on, off))
     return bursts
 
-# ===== 1er y último spike por cruces con interpolación (robusto + fallback) =====
-def _cross_time(t0,x0,t1,x1,thr):
-    den = (x1 - x0)
-    if abs(den) < 1e-12: return t0
-    a = (thr - x0) / den
-    a = np.clip(a, 0.0, 1.0)
-    return t0 + a*(t1 - t0)
-
-def spike_edges_in_bursts_cross(t, x, bursts, v_spike=0.0):
-    """
-    Para cada burst [on, off] devuelve (first_spike, last_spike) como:
-    - first: primer cruce ascendente de v_spike
-    - last : último cruce descendente de v_spike
-    Si no hay cruces, intenta umbral adaptativo; si no, usa máximo local; si no, on/off.
-    """
-    t=np.asarray(t); x=np.asarray(x)
-    first=[]; last=[]
-    for (a,b) in bursts:
-        m=(t>=a) & (t<=b)
-        tt=t[m]; xx=x[m]
-        if tt.size<2:
-            first.append(a); last.append(b); continue
-
-        def _edges_for(thr):
-            above = xx >= thr
-            if not above.any(): return None
-            idx = np.where(above)[0]
-            i0, i1 = int(idx[0]), int(idx[-1])
-            # primer cruce ascendente
-            if i0>0:
-                t_first = _cross_time(tt[i0-1], xx[i0-1], tt[i0], xx[i0], thr)
-            else:
-                t_first = tt[i0]
-            # último cruce descendente
-            if i1 < len(xx)-1:
-                t_last = _cross_time(tt[i1], xx[i1], tt[i1+1], xx[i1+1], thr)
-            else:
-                t_last = tt[i1]
-            return t_first, t_last
-
-        out = _edges_for(v_spike)
-        if out is None:
-            xm = float(np.median(xx)); xM = float(np.max(xx))
-            thr = xm + 0.4*(xM - xm)
-            out = _edges_for(thr)
-        if out is None:
-            kmax=int(np.nanargmax(xx)); tpk=tt[kmax]
-            first.append(tpk); last.append(tpk)
-        else:
-            first.append(out[0]); last.append(out[1])
-    return np.array(first,float), np.array(last,float)
-
-# ===== Ciclos (paper + spikes) =====
-def build_cycles_Xleader(burstsX, burstsY, t, x, y, v_spike=0.0, tmin=None, tmax=None):
+# ===== Ciclos (paper; usando 1er/último spike de cada ráfaga) =====
+def build_cycles_Xleader(burstsX, burstsY, X_first, X_last, Y_first, Y_last, tmin=None, tmax=None):
     if tmin is not None or tmax is not None:
         def _crop(bb):
             out=[]
@@ -192,13 +194,10 @@ def build_cycles_Xleader(burstsX, burstsY, t, x, y, v_spike=0.0, tmin=None, tmax
         burstsX=_crop(burstsX); burstsY=_crop(burstsY)
     if len(burstsX)<3 or len(burstsY)<2: return []
 
-    X_on  = np.array([on  for on,off in burstsX], float)
-    X_off = np.array([off for on,off in burstsX], float)
+    X_on  = np.array([on  for on,off in burstsX], float)   # 1er spike de cada ráfaga X
+    X_off = np.array([off for on,off in burstsX], float)   # último spike de cada ráfaga X
     Y_on  = np.array([on  for on,off in burstsY], float)
     Y_off = np.array([off for on,off in burstsY], float)
-
-    X_first, X_last = spike_edges_in_bursts_cross(t, x, burstsX, v_spike=v_spike)
-    Y_first, Y_last = spike_edges_in_bursts_cross(t, y, burstsY, v_spike=v_spike)
 
     def pick_Y_in(a,b):
         j=np.searchsorted(Y_on, a, side="left")
@@ -219,18 +218,18 @@ def build_cycles_Xleader(burstsX, burstsY, t, x, y, v_spike=0.0, tmin=None, tmax
             if j1+1 < len(Y_on): j1 += 1
             else: continue
         cycles.append(dict(
-            # sombreado (umbral bajo)
+            # ráfagas (sombras)
             x_on0=x0, x_off0=xf0, x_on1=x1, x_off1=xf1, x_on2=x2,
             y0_on=Y_on[j0], y0_off=Y_off[j0], y1_on=Y_on[j1], y1_off=Y_off[j1],
-            # spikes (altos)
-            X1_first=X_first[i],   X1_last=X_last[i],
-            X2_first=X_first[i+1], X2_last=X_last[i+1],
-            Y1_first=Y_first[j0],  Y1_last=Y_last[j0],
-            Y2_first=Y_first[j1],  Y2_last=Y_last[j1],
+            # spikes equivalentes (coinciden con on/off)
+            X1_first=X_on[i],   X1_last=X_off[i],
+            X2_first=X_on[i+1], X2_last=X_off[i+1],
+            Y1_first=Y_on[j0],  Y1_last=Y_off[j0],
+            Y2_first=Y_on[j1],  Y2_last=Y_off[j1],
         ))
     return cycles
 
-# ===== Métricas (paper con spikes) =====
+# ===== Métricas =====
 def metrics_from_cycle(c):
     P_X = c["X2_first"] - c["X1_first"]
     P_Y = c["Y2_first"] - c["Y1_first"]
@@ -306,7 +305,7 @@ def plotly_pairgrid(df, cols, corner=False, nbins=24, marker_size=3, opacity=0.7
     return fig
 
 # ======================== UI ========================
-st.title("Hindmarsh–Rose (2 neuronas) — invariantes por ciclo")
+st.title("Hindmarsh–Rose (2 neuronas) — ráfagas por ISI (eje X)")
 
 with st.sidebar:
     st.header("Configuración")
@@ -318,7 +317,9 @@ with st.sidebar:
     nsteps=st.number_input("Nº de pasos (TIME)", min_value=100_000, value=1_200_000, step=100_000)
     dt = st.number_input("dt (s)", min_value=0.0002, max_value=0.01, value=0.001, step=0.0002, format="%.4f")
     gamma = st.number_input("Escala temporal γ (solo visualización/métricas)", min_value=0.5, max_value=40.0, value=18.0, step=0.5)
-    decim_evt=st.number_input("Muestreo para detección (cada N pasos)", min_value=1, max_value=10_000, value=60, step=5)
+    decim_plot=st.number_input("Decimación para dibujo (cada N pasos)", min_value=1, max_value=10_000, value=60, step=5)
+    decim_evt =st.number_input("Muestreo interno p/detección (cada N pasos)", min_value=1, max_value=10_000, value=60, step=5,
+                                help="Se fuerza ≤10 internamente para no perder picos.")
     burn_in_s = st.number_input("Descartar transitorio (s, tiempo físico)", min_value=0.0, value=0.0, step=1.0)
 
     st.subheader("Parámetros neurales")
@@ -348,13 +349,12 @@ with st.sidebar:
         g_syn=0.35; theta=-0.25; kk=10.0; Esy=-2.0
         g_fast=0.10; Esy_c=-1.8; Vfast=-1.1; sfast=0.2
 
-    st.subheader("Detección de ráfagas")
-    v_th=st.number_input("Umbral bajo v_th",value=-0.60,step=0.01)
-    min_on=st.number_input("Duración mínima ON (s)",value=0.10,step=0.01)
-    min_off=st.number_input("Duración mínima OFF (s)",value=0.05,step=0.01)
-
-    st.subheader("Picos dentro del burst (1er/último spike)")
-    v_spike = st.number_input("Umbral alto v_spike", value=0.00, step=0.05, format="%.2f")
+    st.subheader("Spikes y ráfagas (eje X)")
+    v_peak_floor = st.number_input("Piso de amplitud para picos (opcional)", value=0.00, step=0.05, format="%.2f")
+    gap_factor   = st.number_input("Gap factor (separación ISI)", value=3.0, step=0.5, format="%.1f",
+                                   help="Nuevo burst cuando ISI > gap_factor × ISI_intra")
+    min_spikes   = st.number_input("Mínimo de spikes por ráfaga", value=2, min_value=1, step=1)
+    min_burst_dur= st.number_input("Duración mínima de ráfaga (s)", value=0.02, step=0.01, format="%.2f")
 
     st.subheader("Integrador")
     use_lsoda = st.radio("Método",["LSODA (recomendado)","RK4 (fallback)"],index=0,horizontal=True).startswith("LSODA")
@@ -369,41 +369,54 @@ elec_par=dict(g_el=float(locals().get("g_el",0.0)))
 y0=np.array([-0.915325,-3.208968,3.350784,-1.307949,-7.580493,3.068898],float)
 
 # Simulación
-t_phys, sol_phys = simulate(mode,prm_dict,sigm_par,cpp_par,elec_par,
-                            y0,int(nsteps),float(dt),int(decim_evt),float(burn_in_s),use_lsoda)
-x1, x2 = sol_phys[:,0], sol_phys[:,3]
+t_det, sol_det, t_disp, sol_disp = simulate(
+    mode,prm_dict,sigm_par,cpp_par,elec_par,
+    y0,int(nsteps),float(dt),int(decim_plot),int(decim_evt),float(burn_in_s),use_lsoda
+)
+x1_det, x2_det = sol_det[:,0], sol_det[:,3]
+x1, x2         = sol_disp[:,0], sol_disp[:,3]
+
 gamma = float(locals().get("gamma",18.0))
-t_disp = t_phys / gamma
+t_disp_g = t_disp / gamma
 
-# ===== Detección previa para pintar spikes en las series =====
-burstsX = detect_bursts_interp(t_phys, x1, v_th=float(v_th), min_on=float(min_on), min_off=float(min_off))
-burstsY = detect_bursts_interp(t_phys, x2, v_th=float(v_th), min_on=float(min_on), min_off=float(min_off))
-Xf, Xl = spike_edges_in_bursts_cross(t_phys, x1, burstsX, v_spike=float(v_spike))
-Yf, Yl = spike_edges_in_bursts_cross(t_phys, x2, burstsY, v_spike=float(v_spike))
+# ===== Spikes → Ráfagas por ISI =====
+spkX = detect_spikes(t_det, x1_det, v_floor=float(v_peak_floor))
+spkY = detect_spikes(t_det, x2_det, v_floor=float(v_peak_floor))
 
-# ===== Series + marcadores de spikes (arriba) =====
-st.header("Series temporales con 1er/último spike por burst")
+burstsX = bursts_from_spikes(spkX, gap_factor=float(gap_factor),
+                             min_spikes=int(min_spikes), min_dur=float(min_burst_dur))
+burstsY = bursts_from_spikes(spkY, gap_factor=float(gap_factor),
+                             min_spikes=int(min_spikes), min_dur=float(min_burst_dur))
+
+X_first = np.array([on  for on,off in burstsX], float); X_last = np.array([off for on,off in burstsX], float)
+Y_first = np.array([on  for on,off in burstsY], float); Y_last = np.array([off for on,off in burstsY], float)
+
+# ===== Series con marcadores =====
+st.header("Series temporales con 1er/último spike por ráfaga (detección por ISI)")
 fig_over=go.Figure()
-fig_over.add_trace(go.Scatter(x=t_disp,y=x1,name="X (N1)",line=dict(color=COL["X"],width=1.8)))
-fig_over.add_trace(go.Scatter(x=t_disp,y=x2,name="Y (N2)",line=dict(color=COL["Y"],width=1.8)))
-# X first / last
-if Xf.size:
-    fig_over.add_trace(go.Scatter(x=Xf/gamma, y=np.interp(Xf,t_phys,x1), mode="markers",
-                                  marker=dict(symbol="triangle-up", size=7, color="#FF9AA2"),
-                                  name="X primer spike"))
-if Xl.size:
-    fig_over.add_trace(go.Scatter(x=Xl/gamma, y=np.interp(Xl,t_phys,x1), mode="markers",
-                                  marker=dict(symbol="triangle-down", size=7, color="#C0392B"),
-                                  name="X último spike"))
-# Y first / last
-if Yf.size:
-    fig_over.add_trace(go.Scatter(x=Yf/gamma, y=np.interp(Yf,t_phys,x2), mode="markers",
-                                  marker=dict(symbol="triangle-up", size=7, color="#9AD0FF"),
-                                  name="Y primer spike"))
-if Yl.size:
-    fig_over.add_trace(go.Scatter(x=Yl/gamma, y=np.interp(Yl,t_phys,x2), mode="markers",
-                                  marker=dict(symbol="triangle-down", size=7, color="#2162B0"),
-                                  name="Y último spike"))
+fig_over.add_trace(go.Scatter(x=t_disp_g,y=x1,name="X (N1)",line=dict(color=COL["X"],width=1.8)))
+fig_over.add_trace(go.Scatter(x=t_disp_g,y=x2,name="Y (N2)",line=dict(color=COL["Y"],width=1.8)))
+
+# sombreo de ráfagas
+for (a,b) in burstsX:
+    fig_over.add_vrect(x0=a/gamma, x1=b/gamma, fillcolor=COL["X"], opacity=0.10, line_width=0)
+for (a,b) in burstsY:
+    fig_over.add_vrect(x0=a/gamma, x1=b/gamma, fillcolor=COL["Y"], opacity=0.10, line_width=0)
+
+# marcadores 1er/último
+if X_first.size:
+    fig_over.add_trace(go.Scatter(x=X_first/gamma, y=np.interp(X_first,t_det,x1_det), mode="markers",
+                                  marker=dict(symbol="triangle-up", size=7, color="#FF9AA2"), name="X primer spike"))
+if X_last.size:
+    fig_over.add_trace(go.Scatter(x=X_last/gamma,  y=np.interp(X_last, t_det,x1_det), mode="markers",
+                                  marker=dict(symbol="triangle-down", size=7, color="#C0392B"), name="X último spike"))
+if Y_first.size:
+    fig_over.add_trace(go.Scatter(x=Y_first/gamma, y=np.interp(Y_first,t_det,x2_det), mode="markers",
+                                  marker=dict(symbol="triangle-up", size=7, color="#9AD0FF"), name="Y primer spike"))
+if Y_last.size:
+    fig_over.add_trace(go.Scatter(x=Y_last/gamma,  y=np.interp(Y_last, t_det,x2_det), mode="markers",
+                                  marker=dict(symbol="triangle-down", size=7, color="#2162B0"), name="Y último spike"))
+
 fig_over.update_layout(height=330,xaxis_title="tiempo (s)",yaxis_title="x",
                        margin=dict(l=10,r=10,b=10,t=10),
                        legend=dict(orientation="h",yanchor="bottom",y=1.02,xanchor="right",x=1.0))
@@ -411,32 +424,28 @@ st.plotly_chart(fig_over,use_container_width=True)
 
 # ===== Ventana y ciclos =====
 st.subheader("Ventana temporal para detección de ciclos (se muestra en t/γ)")
-t0, t1 = float(t_disp[0]), float(t_disp[-1])
+t0, t1 = float(t_disp_g[0]), float(t_disp_g[-1])
 step_slider = max((t1-t0)/1000.0, 1e-6)
 win_disp = st.slider("Selecciona ventana", min_value=t0, max_value=t1, value=(t0, t1),
                      step=step_slider, format="%.2f")
 win_phys = (win_disp[0]*gamma, win_disp[1]*gamma)
 
-# ciclos con spikes (paper)
-cycles = build_cycles_Xleader(burstsX, burstsY, t_phys, x1, x2,
-                              v_spike=float(v_spike),
+# ciclos desde ráfagas por ISI
+cycles = build_cycles_Xleader(burstsX, burstsY, X_first, X_last, Y_first, Y_last,
                               tmin=win_phys[0], tmax=win_phys[1])
 
-# escalar a t/γ
 def _scale_cycle(c, s):
     out={}
     for k,v in c.items():
-        try:
-            vv=float(v); out[k]= (vv/s) if np.isfinite(vv) else vv
-        except Exception:
-            out[k]=v
+        try: vv=float(v); out[k]= (vv/s) if np.isfinite(vv) else vv
+        except Exception: out[k]=v
     return out
 cycles_disp=[_scale_cycle(c, gamma) for c in cycles]
 df_cycles = cycles_dataframe(cycles_disp)
 
 # ===== Diagrama =====
 st.header("Diagrama de ciclo (definición del paper)")
-st.caption(f"Ráfagas detectadas: X={len(burstsX)} | Y={len(burstsY)} | Ciclos={len(cycles_disp)}")
+st.caption(f"Spikes detectados: X={len(spkX)} | Y={len(spkY)} · Ráfagas (ISI): X={len(burstsX)} | Y={len(burstsY)} | Ciclos={len(cycles_disp)}")
 if not cycles_disp:
     st.info("No hay ciclos válidos en la ventana.")
 else:
@@ -444,21 +453,20 @@ else:
     cyc = cycles_disp[idx-1]; m=metrics_from_cycle(cyc)
 
     P = cyc["X2_first"] - cyc["X1_first"]
-    tmin=max(t_disp[0], cyc["X1_first"]-0.2*P)
-    tmax=min(t_disp[-1], max(cyc["X2_first"]+0.3*P, cyc["Y2_first"]+0.1*P))
-    mm=(t_disp>=tmin)&(t_disp<=tmax)
+    tmin=max(t_disp_g[0], cyc["X1_first"]-0.2*P)
+    tmax=min(t_disp_g[-1], max(cyc["X2_first"]+0.3*P, cyc["Y2_first"]+0.1*P))
+    mm=(t_disp_g>=tmin)&(t_disp_g<=tmax)
 
     fig=go.Figure()
-    fig.add_trace(go.Scatter(x=t_disp[mm],y=x1[mm],name="X (N1)",line=dict(color=COL["X"],width=2.0)))
-    fig.add_trace(go.Scatter(x=t_disp[mm],y=x2[mm],name="Y (N2)",line=dict(color=COL["Y"],width=2.0)))
+    fig.add_trace(go.Scatter(x=t_disp_g[mm],y=x1[mm],name="X (N1)",line=dict(color=COL["X"],width=2.0)))
+    fig.add_trace(go.Scatter(x=t_disp_g[mm],y=x2[mm],name="Y (N2)",line=dict(color=COL["Y"],width=2.0)))
 
-    # sombreado (umbral bajo)
+    # sombreado de ráfagas (1er→último spike)
     fig.add_vrect(x0=cyc["x_on0"],x1=cyc["x_off0"],fillcolor=COL["X"],opacity=0.16,line_width=0)
     fig.add_vrect(x0=cyc["y0_on"],x1=cyc["y0_off"],fillcolor=COL["Y"],opacity=0.16,line_width=0)
     fig.add_vrect(x0=cyc["x_on1"],x1=cyc["x_off1"],fillcolor=COL["X"],opacity=0.10,line_width=0)
     fig.add_vrect(x0=cyc["y1_on"],x1=cyc["y1_off"],fillcolor=COL["Y"],opacity=0.10,line_width=0)
 
-    # líneas de métrica (spikes)
     y_top=max(np.max(x1[mm]),np.max(x2[mm])); y_bot=min(np.min(x1[mm]),np.min(x2[mm])); dy=y_top-y_bot; yb=y_bot-0.10*dy
     def _span(a,b,y,txt,col):
         a=max(float(a),float(tmin)); b=min(float(b),float(tmax))
@@ -492,7 +500,7 @@ else:
     df_show.index = np.arange(1, len(df_show)+1); df_show.index.name = "ciclo"
     st.dataframe(df_show, use_container_width=True, height=280)
     st.download_button("Descargar CSV de ciclos", data=df_show.to_csv().encode("utf-8"),
-                       file_name="ciclos_xy_spikes.csv", mime="text/csv")
+                       file_name="ciclos_xy_isi.csv", mime="text/csv")
 
 # ===== Pairplots =====
 st.header("Relaciones ciclo-a-ciclo (10×10)")
@@ -519,6 +527,8 @@ if df_cycles.shape[0] >= 4:
 else:
     st.info("Se requieren al menos 4 ciclos para generar los cruces.")
 
-st.caption(f"Muestras (t/γ): {len(t_disp):,} | Ciclos válidos en ventana: {len(cycles_disp)} | "
-           f"Integrador: {'LSODA' if locals().get('use_lsoda',True) else 'RK4'} | dt={float(locals().get('dt',0.001)):g}s | "
-           f"decimación={int(locals().get('decim_evt',60))}× | γ={gamma:g} | ventana=[{win_disp[0]:.2f}, {win_disp[1]:.2f}] s")
+st.caption(f"Muestras (t/γ): {len(t_disp_g):,} | Ráfagas (ISI): X={len(burstsX)}, Y={len(burstsY)} | "
+           f"Ciclos: {len(cycles_disp)} | Integrador: {'LSODA' if locals().get('use_lsoda',True) else 'RK4'} | "
+           f"dt={float(locals().get('dt',0.001)):g}s | decimación dibujo={int(locals().get('decim_plot',60))}× | "
+           f"muestreo detección={int(locals().get('decim_evt',60))}× (forzado ≤10) | γ={gamma:g} | "
+           f"ventana=[{win_disp[0]:.2f}, {win_disp[1]:.2f}] s")
