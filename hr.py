@@ -256,7 +256,7 @@ if shade_bursts and (t1 - t0) <= 4000:
             fig.add_vrect(x0=float(t_on), x1=float(t_off),
                           fillcolor=f"rgba(255,255,255,{burst_alpha})", line_width=0)
 
-fig.update_xaxes(title="tiempo (s)"); fig.update_yaxes(title="x")
+fig.update_xaxes(title="tiempo"); fig.update_yaxes(title="x")
 st.plotly_chart(fig, use_container_width=True, theme=None)
 
 if show_phase_xy or show_phase_xz:
