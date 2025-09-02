@@ -1,48 +1,41 @@
-# main.py — Menú principal mejorado (tema oscuro)
-
+# main.py
 import streamlit as st
-from streamlit_option_menu import option_menu
 import numpy as np
 import plotly.express as px
+from modules.ui import require_auth, generar_menu
 
-# ============================================================
-# Navegación (sin pages): usamos session_state["menu_idx"]
-# ============================================================
-MENU_ITEMS = [
-    "Home",
-    "Modelo Hindmarsh–Rose",
-    "Modelo Izhikevich",
-    "Modelo Rulkov",
-    "Modelo Hodgkin–Huxley",
-    "Invariantes",
-    "Miguel Angel Calderón",
-]
-ICONOS = ["house", "activity", "cpu", "triangle", "bezier", "bar-chart-line", "person"]
-MENU_INDEX = {name: i for i, name in enumerate(MENU_ITEMS)}
-if "menu_idx" not in st.session_state:
-    st.session_state["menu_idx"] = 0
 
-def goto(name: str):
-    st.session_state["menu_idx"] = MENU_INDEX[name]
-    st.experimental_rerun()
 
-# ============================================================
-# Helper para ejecutar módulos externos
-# ============================================================
-def run_module(path: str):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            code = f.read()
-        exec(compile(code, path, "exec"), {})
-    except FileNotFoundError:
-        st.error(f"No se encontró el archivo: {path}")
-    except Exception as e:
-        st.error(f"Error al ejecutar {path}: {e}")
-        st.exception(e)
+st.set_page_config(page_title="Herramienta de Simulación de Neuronas", layout="wide")
 
-# ============================================================
-# Previews rápidos (parámetros estándar; horizontes cortos)
-# ============================================================
+# --- guardia de login + menú propio ---
+require_auth(login_page="pages/00_Auto_Auth.py")
+generar_menu(
+    usuario=st.session_state.get("usuario"),
+    msisdn=st.session_state.get("user_msisdn"),
+)
+
+# ----------------------------- ESTILO (ligero, “futurista”) -----------------------------
+st.markdown("""
+<style>
+/* botones y links */
+.stButton button, a[kind="pageLink"] {
+  border-radius: 12px; padding: .6rem 1rem;
+  backdrop-filter: blur(6px);
+  background: rgba(13, 16, 26, 0.55);
+  border: 1px solid rgba(255,255,255,0.12);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.25), 0 0 0 1px rgba(255,255,255,0.03) inset;
+}
+/* métricas */
+[data-testid="stMetric"] {
+  background: rgba(31, 41, 55, .45);
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: 14px; padding: .6rem .8rem; margin-top: .2rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# --------------------------------- PREVIEWS (tus funciones) ---------------------------------
 def preview_hr(t_max=2000, dt=0.02):
     a, b, c, d, e = 1.0, 3.0, 1.0, 5.0, 3.0
     r, s, x0 = 0.0021, 4.0, -1.6
@@ -118,105 +111,46 @@ def preview_hh(t_max=50.0, dt=0.01, I=10.0):
         Vs[i] = V; ts[i] = i*dt
     return ts, Vs
 
-# ============================================================
-# Plot helper + métricas rápidas
-# ============================================================
+# --------------------------------- helpers de visualización ---------------------------------
 def small_line(x, y, title, ylab):
-    fig = px.line(x=x, y=y, labels={'x': 'Tiempo', 'y': ylab})
+    fig = px.line(x=x, y=y, labels={'x':'Tiempo','y':ylab})
     fig.update_layout(title=title, template="plotly_dark",
                       margin=dict(l=10, r=10, t=35, b=10), height=300)
     fig.update_traces(line=dict(width=1.6))
     return fig
 
-def quick_metrics(y, t):
+def quick_metrics_no_rate(y):
     amp = float(np.max(y) - np.min(y)) if len(y) else 0.0
-    mean = float(np.mean(y)) if len(y) else 0.0
-    # picos por percentil 90 (aprox)
     spk = 0
     if len(y) >= 3:
         thr = np.percentile(y, 90.0)
         xm1, xc, xp1 = y[:-2], y[1:-1], y[2:]
         spk = int(np.sum((xc > xm1) & (xc >= xp1) & (xc > thr)))
-    dur = (t[-1] - t[0]) if len(t) else 0.0
-    rate = (spk / dur) if dur > 0 else 0.0
-    return amp, mean, spk, rate
+    return amp, spk
 
-def card_preview(title, preview_fun, ylab, goto_label):
+def card_preview(title, preview_fun, ylab, page_path):
     t, y = preview_fun()
-    fig = small_line(t, y, title, ylab)
-    st.plotly_chart(fig, use_container_width=True)
-    amp, mean, spk, rate = quick_metrics(y, t)
-    c1, c2, c3 = st.columns(3)
+    st.plotly_chart(small_line(t, y, title, ylab), use_container_width=True)
+    amp, spk = quick_metrics_no_rate(y)
+    c1, c2 = st.columns(2)
     c1.metric("Amplitud", f"{amp:.2f}")
     c2.metric("Picos", f"{spk}")
-    c3.metric("Tasa aprox.", f"{rate:.2f} /t")
-    st.button(f"➡️ Ir a {goto_label}", use_container_width=True, on_click=goto, args=(goto_label,))
+    st.page_link(page_path, label=f"➡️ Ir a {title}", use_container_width=True)
+    if st.button(f"Abrir {title}", use_container_width=True):
+        st.switch_page(page_path)
 
-# ============================================================
-# Sidebar / Menú
-# ============================================================
-with st.sidebar:
-    selected = option_menu(
-        menu_title="Main Menu",
-        options=MENU_ITEMS,
-        icons=ICONOS,
-        menu_icon="cast",
-        default_index=st.session_state["menu_idx"],
-        styles={
-            "container": {"padding": "0!important"},
-            "icon": {"color": "#9aa0a6", "font-size": "18px"},
-            "nav-link": {
-                "font-size": "15px",
-                "text-align": "left",
-                "margin": "0",
-                "padding": "8px 14px",
-                "border-radius": "8px",
-            },
-            "nav-link-selected": {"background-color": "#1f2937"},
-        },
-    )
-    # Sincroniza el índice al cambiar manualmente
-    st.session_state["menu_idx"] = MENU_INDEX[selected]
+# --------------------------------- HOME ---------------------------------
+st.header("Herramienta de Simulación de Neuronas")
+st.caption("Vista previa rápida de los modelos. Usa los enlaces o botones para ir a cada simulador.")
 
-# ============================================================
-# Ruteo de páginas
-# ============================================================
-if selected == "Home":
-    st.header("Herramienta de Simulación de Neuronas")
-    st.caption("Vista previa rápida de los modelos. Usa los botones para saltar a cada simulador.")
-    # Cuadrícula 2x2 de tarjetas
-    col1, col2 = st.columns(2)
-    with col1:
-        card_preview("Modelo Hindmarsh–Rose", preview_hr, "x", "Modelo Hindmarsh–Rose")
-    with col2:
-        card_preview("Modelo Rulkov", preview_rk, "x", "Modelo Rulkov")
-    col3, col4 = st.columns(2)
-    with col3:
-        card_preview("Modelo Hodgkin–Huxley", preview_hh, "V (mV)", "Modelo Hodgkin–Huxley")
-    with col4:
-        card_preview("Modelo Izhikevich", preview_izh, "v (mV)", "Modelo Izhikevich")
+col1, col2 = st.columns(2)
+with col1:
+    card_preview("Modelo Hindmarsh–Rose", preview_hr, "x (u.a.)", "pages/1_Modelo Hindmarsh–Rose.py")
+with col2:
+    card_preview("Modelo Rulkov",        preview_rk, "x (u.a.)", "pages/2_Modelo Rulkov.py")
 
-elif selected == "Modelo Hindmarsh–Rose":
-    st.header("Simulación del Modelo Hindmarsh–Rose")
-    run_module("hr.py")
-
-elif selected == "Modelo Izhikevich":
-    st.header("Simulación del Modelo Izhikevich")
-    run_module("iz.py")   # cambia a "iz.py" si tu archivo se llama así
-
-elif selected == "Modelo Rulkov":
-    st.header("Simulación del Modelo Rulkov")
-    run_module("rk.py")
-
-elif selected == "Modelo Hodgkin–Huxley":
-    st.header("Simulación del Modelo Hodgkin–Huxley")
-    run_module("hh.py")
-
-elif selected == "Invariantes":
-    st.header("Invariantes Dinámicos")
-    run_module("hri.py")
-
-elif selected == "Miguel Angel Calderón":
-    st.header("Miguel Angel Calderón")
-    st.write("Data Scientist.")
-
+col3, col4 = st.columns(2)
+with col3:
+    card_preview("Modelo Hodgkin–Huxley", preview_hh, "V (mV)",  "pages/4_Modelo Hodgkin–Huxley.py")
+with col4:
+    card_preview("Modelo Izhikevich",     preview_izh, "v (mV)",  "pages/3_Modelo Izhikevich.py")

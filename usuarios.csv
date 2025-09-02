@@ -1,0 +1,2 @@
+usuario,nombre,rol,msisdn,pass_hash,salt
+admin,Administrador,admin,+593991234561,8099d79da901c9fbca7b7be78c165a743dabe5c93666e7362cbc38ac1126fce4,3f9a7c1b77a2c1d0

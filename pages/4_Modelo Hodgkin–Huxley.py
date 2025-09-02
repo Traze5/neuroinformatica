@@ -7,6 +7,14 @@ import time
 import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
+from modules.ui import require_auth, sidebar_minimal
+
+st.set_page_config(page_title="⚡ Modelo Hodgkin–Huxley", layout="wide")  # el page_title que quieras
+require_auth(login_page="pages/00_Auto_Auth.py")
+sidebar_minimal("⚡ Modelo Hodgkin–Huxley",
+                usuario=st.session_state.get("usuario"),
+                msisdn=st.session_state.get("user_msisdn"),
+                width_px=300)
 
 # ------------------------------------------------------------
 # Aceleración opcional con Numba

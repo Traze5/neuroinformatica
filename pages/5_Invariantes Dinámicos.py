@@ -7,8 +7,14 @@ import numpy as np, pandas as pd, streamlit as st, warnings
 from dataclasses import dataclass
 from plotly import graph_objects as go
 from plotly.subplots import make_subplots
+from modules.ui import require_auth, sidebar_minimal
 
-st.set_page_config(page_title="HR (2 neuronas) — ráfagas por ISI", layout="wide")
+st.set_page_config(page_title="📊 Invariantes Dinámicos", layout="wide")  # el page_title que quieras
+require_auth(login_page="pages/00_Auto_Auth.py")
+sidebar_minimal("📊 Invariantes Dinámicos",
+                usuario=st.session_state.get("usuario"),
+                msisdn=st.session_state.get("user_msisdn"),
+                width_px=300)
 
 # ===== SciPy (LSODA) =====
 try:

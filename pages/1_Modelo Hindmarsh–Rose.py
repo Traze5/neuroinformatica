@@ -4,6 +4,16 @@ import streamlit as st
 import numpy as np
 from dataclasses import dataclass
 import plotly.graph_objects as go
+from modules.ui import require_auth, sidebar_minimal
+
+st.set_page_config(page_title="🌊 Modelo Hindmarsh–Ros", layout="wide")
+
+require_auth()
+require_auth(login_page="pages/00_Auto_Auth.py")
+sidebar_minimal("🌊 Modelo Hindmarsh–Rose",
+                usuario=st.session_state.get("usuario"),
+                msisdn=st.session_state.get("user_msisdn"),
+                width_px=300)
 
 # Numba opcional
 try:
@@ -126,7 +136,7 @@ def integrate(fun, t_max, dt, x0_state, args=(), method="euler", variant="HR"):
 # -------------------- presets --------------------
 PRESETS = {
     "HR normal":     dict(a=1.0, b=3.0, c=1.0, d=5.0, e=3.0,   r=0.0021, s=4.0,  x0=-1.6, dt=0.01, t_max=15000.0),
-    "HR caótico":    dict(a=1.0, b=3.0, c=1.0, d=5.0, e=2.5,   r=0.0021, s=4.1,  x0=-1.6, dt=0.01, t_max=15000.0),
+    "HR caótico":    dict(a=1.0, b=3.0, c=1.0, d=5.0, e=3.281,   r=0.0021, s=4.1,  x0=-1.6, dt=0.01, t_max=15000.0),
     "HR modificado": dict(a=1.0, b=3.0, c=1.0, d=5.0, e=3.281, r=0.0021, s=1.0,  x0=-1.6, nu=0.10, dt=0.01, t_max=15000.0),
 }
 
@@ -228,15 +238,27 @@ t_d, x_d, y_d, z_d = t[::stride], x[::stride], y[::stride], z[::stride]
 
 st.subheader("Señales")
 step_f = float(p["dt"])*stride
-t0, t1 = st.slider("Ventana temporal", float(t_d[0]), float(t_d[-1]),
-                   (float(t_d[0]), float(t_d[-1])), step=step_f,
-                   key=f"win_{_sig(p)}")
+
+
+VENTANA_DEF = 6000.0
+t1_def = float(t_d[-1])
+t0_def = max(float(t_d[0]), t1_def - VENTANA_DEF)
+
+t0, t1 = st.slider(
+    "Ventana temporal",
+    min_value=float(t_d[0]),
+    max_value=float(t_d[-1]),
+    value=(t0_def, t1_def),   # �?ya no arranca en 0
+    step=step_f,
+    key=f"win_{_sig(p)}"
+)
+
 sel = (t_d>=t0) & (t_d<=t1)
 tt, xx, yy, zz = t_d[sel], x_d[sel], y_d[sel], z_d[sel]
 
 fig = go.Figure()
 fig.update_layout(template="plotly_dark", height=380, margin=dict(l=40,r=20,t=40,b=40),
-                  title=f"{st.session_state.hr_variant} — x(t)")
+                  title=f"{st.session_state.hr_variant} �?x(t)")
 fig.add_trace(go.Scattergl(x=tt, y=xx, name="x(t)", mode="lines", line=dict(width=1.2)))
 if show_y: fig.add_trace(go.Scattergl(x=tt, y=yy, name="y(t)", mode="lines", line=dict(width=1)))
 if show_z: fig.add_trace(go.Scattergl(x=tt, y=zz, name="z(t)", mode="lines", line=dict(width=1)))
