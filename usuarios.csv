@@ -1,2 +1,4 @@
 usuario,nombre,rol,msisdn,pass_hash,salt
-admin,Administrador,admin,+593991234561,8099d79da901c9fbca7b7be78c165a743dabe5c93666e7362cbc38ac1126fce4,3f9a7c1b77a2c1d0
+admin,Miguel Admin,admin,+593991111111,9102f4b7a09b7f5d6752065dae3b7b77bc5af823f46122b62218032d962400e0,s4-admin-2025
+german,German,user,+593992222222,c2d736fc2674d8d34fa7ddbf2338b3ef1e8247ded5e2c4ef206306b622519a25,s4-german-2025
+pablo,Pablo,user,+593993333333,eacf5373a6bc936788d2e8f17ca7b7f21eb1875ff34b7a88c582629ac9d28fb3,s4-pablo-2025
