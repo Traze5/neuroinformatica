@@ -33,6 +33,19 @@ def _link_if_exists(file_name: str, label: str, icon: str):
     if path.exists():
         st.page_link(str(path).replace("\\", "/"), label=label, icon=icon)
 
+# --- Logout centralizado ---
+def _clear_query_params():
+    # 1.49+ tiene st.query_params; versiones previas usan experimental_set_query_params
+    try:
+        st.query_params.clear()          # Streamlit >= 1.29 aprox.
+    except Exception:
+        st.experimental_set_query_params()  # fallback
+
+def do_logout(dest: str = "pages/00_Auto_Auth.py"):
+    st.session_state.clear()   # borra auth_ok, usuario, user_msisdn, nv_ok, etc.
+    _clear_query_params()      # borra ?ua=m|w para que el router decida de nuevo
+    st.switch_page(dest)
+
 def generar_menu(usuario: str | None = None, msisdn: str | None = None):
     """Menú lateral completo (para main.py u otras páginas 'hub')."""
     df = load_users()
@@ -55,21 +68,20 @@ def generar_menu(usuario: str | None = None, msisdn: str | None = None):
         st.page_link("main.py", label="Inicio", icon="🏠")
 
         st.subheader("Modelos")
-        _link_if_exists("1_Modelo Hindmarsh–Rose.py", "Modelo Hindmarsh–Rose", "🌊")
-        _link_if_exists("3_Modelo Izhikevich.py",    "Modelo Izhikevich",     "🧠")
-        _link_if_exists("2_Modelo Rulkov.py",        "Modelo Rulkov",         "🧩")
-        _link_if_exists("4_Modelo Hodgkin–Huxley.py","Modelo Hodgkin–Huxley", "⚡")
+        _link_if_exists("1_Modelo_Hindmarsh_Rose.py", "Modelo Hindmarsh–Rose", "🌊")
+        _link_if_exists("3_Modelo Izhikevich.py",     "Modelo Izhikevich",     "🧠")
+        _link_if_exists("2_Modelo Rulkov.py",         "Modelo Rulkov",         "🧩")
+        _link_if_exists("4_Modelo_Hodgkin_Huxley.py", "Modelo Hodgkin–Huxley", "⚡")
 
         st.subheader("Análisis")
-        _link_if_exists("5_Invariantes Dinámicos.py","Invariantes", "📊")
+        _link_if_exists("5_Invariantes_Dinamicos.py", "Invariantes", "📊")
 
         st.subheader("Perfil")
-        _link_if_exists("6_Miguel Angel Calderón.py","Miguel Angel Calderón", "👤")
+        _link_if_exists("6_Miguel_Angel_Calderon.py", "Miguel Angel Calderón", "👤")
 
         st.divider()
         if st.button("Salir", use_container_width=True):
-            st.session_state.clear()
-            st.switch_page("pages/00_Login.py")
+            do_logout()
 
 # -------------------- modo minimal (páginas de modelos) --------------------
 def hide_sidebar():
@@ -112,18 +124,18 @@ def navbar_minimal(title: str,
                     unsafe_allow_html=True)
     with c4:
         if show_logout and st.button("Salir", use_container_width=True):
-            st.session_state.clear()
-            st.switch_page("pages/00_Login.py")
+            do_logout()
+            
 # Mapa de títulos “bonitos” por archivo (sin .py)
 _TITLE_MAP = {
     "main": "🏠 Inicio",
     "00_Login": "🔐 Login",
-    "1_Modelo Hindmarsh–Rose": "🌊 Modelo Hindmarsh–Rose",
+    "1_Modelo_Hindmarsh_Rose": "🌊 Modelo Hindmarsh–Rose",
     "2_Modelo Rulkov": "🧩 Modelo Rulkov",
     "3_Modelo Izhikevich": "🧠 Modelo Izhikevich",
-    "4_Modelo Hodgkin–Huxley": "⚡ Modelo Hodgkin–Huxley",
-    "5_Invariantes Dinámicos": "📊 Invariantes Dinámicos",
-    "6_Miguel Angel Calderón": "👤 Miguel Angel Calderón",
+    "4_Modelo_Hodgkin_Huxley": "⚡ Modelo Hodgkin–Huxley",
+    "5_Invariantes_Dinamicos": "📊 Invariantes Dinámicos",
+    "6_Miguel_Angel_Calderon": "👤 Miguel Angel Calderón",
 }
 
 def _infer_page_title() -> str:

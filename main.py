@@ -145,12 +145,18 @@ st.caption("Vista previa rápida de los modelos. Usa los enlaces o botones para 
 
 col1, col2 = st.columns(2)
 with col1:
-    card_preview("Modelo Hindmarsh–Rose", preview_hr, "x (u.a.)", "pages/1_Modelo Hindmarsh–Rose.py")
+    card_preview("Modelo Hindmarsh–Rose", preview_hr, "x", "pages/1_Modelo_Hindmarsh_Rose.py")
 with col2:
-    card_preview("Modelo Rulkov",        preview_rk, "x (u.a.)", "pages/2_Modelo Rulkov.py")
+    card_preview("Modelo Rulkov",         preview_rk, "x", "pages/2_Modelo Rulkov.py")
 
 col3, col4 = st.columns(2)
 with col3:
-    card_preview("Modelo Hodgkin–Huxley", preview_hh, "V (mV)",  "pages/4_Modelo Hodgkin–Huxley.py")
+    card_preview("Modelo Hodgkin–Huxley", preview_hh, "V", "pages/4_Modelo_Hodgkin_Huxley.py")
 with col4:
-    card_preview("Modelo Izhikevich",     preview_izh, "v (mV)",  "pages/3_Modelo Izhikevich.py")
+    card_preview("Modelo Izhikevich",     preview_izh,"v","pages/3_Modelo Izhikevich.py")
+
+
+
+
+
+
