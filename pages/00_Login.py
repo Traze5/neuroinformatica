@@ -1,4 +1,4 @@
-# pages/00_Login.py — Login móvil (Open Gateway NV sandbox) → web login si no hay vínculo
+# Login móvil (Open Gateway NV sandbox) → si MSISDN vinculado entra; si no, va a login web
 import json, re, hashlib, requests, streamlit as st
 from modules.ui import load_users  # para buscar MSISDN en usuarios.csv
 
@@ -18,18 +18,16 @@ LABEL_TO_PREFIX = {lbl: pref for _, pref, lbl in PAISES}
 
 def _mask_msisdn(e164: str, country_prefix: str) -> str:
     local = e164.replace(country_prefix, "", 1)
+    local = re.sub(r"\D", "", local or "")
     if len(local) <= 2:
         return f"{country_prefix} {local}"
     return f"{country_prefix} " + ("•" * (len(local)-2)) + local[-2:]
 
 # ------------------------------- Estado persistente ----------------------------
-for k, v in {
-    "nv_ready": False,          # hay sesión lista para entrar con botón
-    "nv_msisdn": "",            # e164 verificado
-    "nv_country_prefix": "",    # prefijo del país
-    "nv_bind_row": None,        # fila del CSV (dict)
-}.items():
-    st.session_state.setdefault(k, v)
+st.session_state.setdefault("nv_ready", False)          # hay sesión lista (botón manual)
+st.session_state.setdefault("nv_msisdn", "")            # e164 verificado
+st.session_state.setdefault("nv_country_prefix", "")    # prefijo del país
+st.session_state.setdefault("nv_bind_row", None)        # fila del CSV (dict)
 
 # ------------------------------- Helpers NV -----------------------------------
 def is_e164(s: str) -> bool:
@@ -76,22 +74,23 @@ st.caption("Sandbox (mock) para prototipado. No requiere OIDC en esta demo.")
 # Asegura CSV fresco cada intento
 load_users.clear()
 
-# Por defecto OFF para que veas la respuesta y aparezca el botón manual
-auto_login = st.toggle("Entrar automáticamente si la verificación es exitosa", value=False)
+# Por defecto OFF para ver la respuesta y permitir botón manual
+auto_login = st.toggle("Entrar automáticamente si la verificación es exitosa", value=False, key="nv_auto")
 
 cols = st.columns([2, 1])
 with cols[0]:
     labels = [p[2] for p in PAISES]
-    sel_label = st.selectbox("País / Código", labels, index=0)
+    sel_label = st.selectbox("País / Código", labels, index=0, key="nv_country_sel")
     country_prefix = LABEL_TO_PREFIX[sel_label]
 
     local_number = st.text_input(
         "Número local (SIN código de país)",
         value=st.session_state.get("last_local", ""),
-        help="Solo dígitos; no incluyas el prefijo del país."
+        help="Solo dígitos; no incluyas el prefijo del país.",
+        key="nv_local"
     )
 with cols[1]:
-    use_hash = st.checkbox("Enviar hash (SHA-256)", help="Envía hashedPhoneNumber en vez de phoneNumber.")
+    use_hash = st.checkbox("Enviar hash (SHA-256)", help="Envía hashedPhoneNumber en vez de phoneNumber.", key="nv_hash")
 
 # Construye E.164 a partir de prefijo + local
 local_digits = re.sub(r"\D", "", local_number or "")
@@ -99,7 +98,7 @@ msisdn_e164  = f"{country_prefix}{local_digits}" if local_digits else ""
 
 # --------------------------- Paso 1: Verificación NV ---------------------------
 if st.button("Verificar ahora", type="primary", use_container_width=True, key="btn_verify"):
-    # limpiamos cualquier intento previo
+    # limpiar flags previos
     st.session_state["nv_ready"] = False
     st.session_state["nv_bind_row"] = None
 
@@ -122,7 +121,7 @@ if st.button("Verificar ahora", type="primary", use_container_width=True, key="b
             # ¿Está vinculado en usuarios.csv?
             row = _match_msisdn_in_csv(msisdn_e164)
             if row is not None:
-                # Guardamos estado para el paso 2 (fuera del if)
+                # Guardamos estado para paso 2 (botón) o autologin
                 st.session_state["nv_ready"] = True
                 st.session_state["nv_msisdn"] = msisdn_e164
                 st.session_state["nv_country_prefix"] = country_prefix
@@ -155,7 +154,6 @@ if st.session_state.get("nv_ready") and not auto_login:
     row = st.session_state.get("nv_bind_row") or {}
     masked = _mask_msisdn(st.session_state["nv_msisdn"], st.session_state["nv_country_prefix"])
     st.success(f"Listo para entrar como: **{row.get('usuario','')}** · {masked}")
-
     if st.button("Ingresar al Simulador", type="primary", use_container_width=True, key="btn_go_main"):
         st.session_state["auth_ok"] = True
         st.session_state["usuario"] = row.get("usuario", "")
