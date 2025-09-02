@@ -537,6 +537,57 @@ if df_cycles.shape[0] >= 4:
 else:
     st.info("Se requieren al menos 4 ciclos para generar los cruces.")
 
+# ===== Estadísticas de los ciclos =====
+st.header("Estadísticas de los ciclos")
+
+if df_cycles.empty:
+    st.info("No hay ciclos en la ventana seleccionada.")
+else:
+    # columnas en el orden del paper/gráfica
+    cols_stats = ["Periodo X","Periodo Y","Burst X","Burst Y",
+                  "Hiperpol. X (IBI)","Hiperpol. Y (IBI)",
+                  "Intervalo X→Y","Intervalo Y→X","Retardo X→Y","Retardo Y→X"]
+    num = df_cycles[ [c for c in cols_stats if c in df_cycles.columns] ].apply(
+        pd.to_numeric, errors="coerce"
+    )
+
+    # resumen básico
+    summary = pd.DataFrame({
+        "n":     num.count(),
+        "media": num.mean(),
+        "mediana": num.median(),
+        "std":   num.std(ddof=1),
+        "p25":   num.quantile(0.25),
+        "p75":   num.quantile(0.75),
+        "min":   num.min(),
+        "max":   num.max(),
+        "CV":    (num.std(ddof=1) / num.mean()).replace([np.inf,-np.inf], np.nan)
+    }).round(4)
+
+    st.subheader("Resumen descriptivo")
+    st.dataframe(summary, use_container_width=True, height=320)
+
+# ===== Correlación (Pearson) con escala divergente centrada en 0 =====
+corr = num.corr(method="pearson").round(3)
+
+figc = go.Figure(data=go.Heatmap(
+    z=corr.values, x=corr.columns, y=corr.index,
+    zmin=-1, zmax=1,            # límites simétricos
+    zmid=0,                     # centra la escala en 0 (blanco)
+    colorscale="RdBu",          # rojo-negativo / azul-positivo
+    reversescale=True,          # invertimos: -1→azul, +1→rojo
+    colorbar=dict(title="r", ticks="outside", tickvals=[-1, -0.5, 0, 0.5, 1])
+))
+figc.update_layout(
+    title="Matriz de correlación (Pearson)",
+    height=420, margin=dict(l=10,r=10,t=40,b=10),
+    plot_bgcolor="#111418", paper_bgcolor="#111418",
+    font=dict(color="#E6E6E6")
+)
+st.plotly_chart(figc, use_container_width=True)
+
+
+
 # ===== Rendimiento =====
 csv_kb = len(csv_bytes)/1024.0 if csv_bytes else 0.0
 st.caption(
