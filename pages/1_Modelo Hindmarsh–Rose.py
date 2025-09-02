@@ -1,4 +1,4 @@
-# Hindmarsh鈥揜ose: presets (normal, ca贸tico, modificado) con simulaci贸n en tiempo real
+# Hindmarsh–Rose: presets (normal, caótico, modificado) con simulación en tiempo real
 import time
 import streamlit as st
 import numpy as np
@@ -6,14 +6,16 @@ from dataclasses import dataclass
 import plotly.graph_objects as go
 from modules.ui import require_auth, sidebar_minimal
 
-st.set_page_config(page_title="馃寠 Modelo Hindmarsh鈥揜os", layout="wide")
+st.set_page_config(page_title="?? Modelo Hindmarsh–Rose", layout="wide")
 
-require_auth()
+# Autenticación + sidebar minimal
 require_auth(login_page="pages/00_Auto_Auth.py")
-sidebar_minimal("馃寠 Modelo Hindmarsh鈥揜ose",
-                usuario=st.session_state.get("usuario"),
-                msisdn=st.session_state.get("user_msisdn"),
-                width_px=300)
+sidebar_minimal(
+    "?? Modelo Hindmarsh–Rose",
+    usuario=st.session_state.get("usuario"),
+    msisdn=st.session_state.get("user_msisdn"),
+    width_px=300
+)
 
 # Numba opcional
 try:
@@ -21,9 +23,6 @@ try:
     NUMBA = True
 except Exception:
     NUMBA = False
-
-st.set_page_config(page_title="Hindmarsh鈥揜ose 路 Presets", layout="wide")
-st.markdown('<style>[data-testid="stSidebar"]{width:360px}</style>', unsafe_allow_html=True)
 
 # -------------------- utilidades --------------------
 def _sig(d):
@@ -58,7 +57,7 @@ def detect_spikes(t, x, thr=None):
     idx = np.where(mid)[0] + 1
     return t[idx], x[idx]
 
-# -------------------- din谩mica HR --------------------
+# -------------------- dinámica HR --------------------
 def f_hr(x, y, z, a, b, c, d, e, r, s, x0):
     dx = y - a*x**3 + b*x**2 - z + e
     dy = c - d*x**2 - y
@@ -136,7 +135,7 @@ def integrate(fun, t_max, dt, x0_state, args=(), method="euler", variant="HR"):
 # -------------------- presets --------------------
 PRESETS = {
     "HR normal":     dict(a=1.0, b=3.0, c=1.0, d=5.0, e=3.0,   r=0.0021, s=4.0,  x0=-1.6, dt=0.01, t_max=15000.0),
-    "HR ca贸tico":    dict(a=1.0, b=3.0, c=1.0, d=5.0, e=3.281,   r=0.0021, s=4.1,  x0=-1.6, dt=0.01, t_max=15000.0),
+    "HR caótico":    dict(a=1.0, b=3.0, c=1.0, d=5.0, e=2.5,   r=0.0021, s=4.1,  x0=-1.6, dt=0.01, t_max=15000.0),
     "HR modificado": dict(a=1.0, b=3.0, c=1.0, d=5.0, e=3.281, r=0.0021, s=1.0,  x0=-1.6, nu=0.10, dt=0.01, t_max=15000.0),
 }
 
@@ -152,7 +151,7 @@ if "hr_last_sig" not in st.session_state:
 if "hr_last_sim_t" not in st.session_state:
     st.session_state.hr_last_sim_t = 0.0
 if "hr_data" not in st.session_state:
-    # simulaci贸n inicial breve
+    # simulación inicial breve
     pm = PRESETS['HR modificado']
     args0 = (pm['a'], pm['b'], pm['c'], pm['d'], pm['e'], pm['r'], pm['s'], pm['x0'], pm['nu'])
     t0, x0, y0, z0 = integrate(
@@ -162,17 +161,19 @@ if "hr_data" not in st.session_state:
     st.session_state.hr_data = dict(t=t0,x=x0,y=y0,z=z0)
 
 # -------------------- controles --------------------
-st.title("Hindmarsh鈥揜ose 路 Presets")
+st.title("Hindmarsh–Rose · Presets")
 
-variant = st.sidebar.selectbox("Variante", list(PRESETS.keys()),
-                               index=list(PRESETS.keys()).index(st.session_state.hr_variant))
+variant = st.sidebar.selectbox(
+    "Variante", list(PRESETS.keys()),
+    index=list(PRESETS.keys()).index(st.session_state.hr_variant)
+)
 if variant != st.session_state.hr_variant:
     st.session_state.hr_variant = variant
     st.session_state.hr_params = PRESETS[variant].copy()
 
 p = st.session_state.hr_params
 
-with st.sidebar.expander("Par谩metros", expanded=True):
+with st.sidebar.expander("Parámetros", expanded=True):
     c1,c2,c3 = st.columns(3)
     p["a"] = c1.number_input("a", 0.0, 10.0, p["a"], 0.1)
     p["b"] = c2.number_input("b", 0.0, 10.0, p["b"], 0.1)
@@ -180,31 +181,31 @@ with st.sidebar.expander("Par谩metros", expanded=True):
     c4,c5,c6 = st.columns(3)
     p["d"]  = c4.number_input("d", 0.0, 20.0, p["d"], 0.1)
     p["e"]  = c5.number_input("e", 0.0, 6.0, p["e"], 0.001, format="%.3f")
-    p["r"]  = c6.number_input("渭", 0.0, 0.02, p["r"], 0.0001, format="%.4f")
+    p["r"]  = c6.number_input("μ", 0.0, 0.02, p["r"], 0.0001, format="%.4f")
     c7,c8,c9 = st.columns(3)
     p["s"]  = c7.number_input("S", 0.0, 8.0, p["s"], 0.1)
-    p["x0"] = c8.number_input("x鈧�", -3.0, 3.0, p["x0"], 0.1)
+    p["x0"] = c8.number_input("x?", -3.0, 3.0, p["x0"], 0.1)
     if variant == "HR modificado":
-        p["nu"] = c9.number_input("谓", 0.0, 2.0, p.get("nu",0.10), 0.01)
+        p["nu"] = c9.number_input("ν", 0.0, 2.0, p.get("nu",0.10), 0.01)
 
-with st.sidebar.expander("Tiempo e integraci贸n", expanded=True):
+with st.sidebar.expander("Tiempo e integración", expanded=True):
     p["dt"]    = st.number_input("dt", 0.0005, 0.1, p["dt"], 0.0005, format="%.4f")
     p["t_max"] = st.number_input("t_max", 1000.0, 60000.0, p["t_max"], 500.0)
     method = st.selectbox("Integrador", ["euler", "rk4"],
                           index=0 if st.session_state.hr_method=="euler" else 1)
     st.session_state.hr_method = "euler" if method=="euler" else "rk4"
-    max_points = st.slider("Puntos m谩x. a dibujar", 1000, 200000, 50000, 1000)
+    max_points = st.slider("Puntos máx. a dibujar", 1000, 200000, 50000, 1000)
     downsample = st.checkbox("Submuestrear si excede puntos", True)
 
-with st.sidebar.expander("Presentaci贸n", expanded=True):
+with st.sidebar.expander("Presentación", expanded=True):
     show_y = st.checkbox("y(t)", False); show_z = st.checkbox("z(t)", False)
-    show_phase_xy = st.checkbox("Retrato x鈥搚", False)
-    show_phase_xz = st.checkbox("Retrato x鈥搝", False)
+    show_phase_xy = st.checkbox("Retrato x–y", False)
+    show_phase_xz = st.checkbox("Retrato x–z", False)
     mark_spikes = st.checkbox("Marcar picos", True)
-    shade_bursts = st.checkbox("Resaltar r谩fagas", False)
-    burst_alpha = st.slider("Opacidad r谩fagas", 0.0, 0.25, 0.06, 0.01)
+    shade_bursts = st.checkbox("Resaltar ráfagas", False)
+    burst_alpha = st.slider("Opacidad ráfagas", 0.0, 0.25, 0.06, 0.01)
 
-# -------------------- simulaci贸n: tiempo real con throttle --------------------
+# -------------------- simulación: tiempo real con throttle --------------------
 THROTTLE = 0.15  # s
 now = time.time()
 sig = _sig({**p, "variant": st.session_state.hr_variant, "method": st.session_state.hr_method})
@@ -218,7 +219,7 @@ if need_sim:
     else:
         fun = f_hr
         args = (p["a"],p["b"],p["c"],p["d"],p["e"],p["r"],p["s"],p["x0"])
-        variant_key = "HR normal" if st.session_state.hr_variant == "HR normal" else "HR ca贸tico"
+        variant_key = "HR normal" if st.session_state.hr_variant == "HR normal" else "HR caótico"
 
     t, x, y, z = integrate(
         fun, t_max=float(p["t_max"]), dt=float(p["dt"]),
@@ -229,17 +230,17 @@ if need_sim:
     st.session_state.hr_last_sig = sig
     st.session_state.hr_last_sim_t = now
 
-# -------------------- visualizaci贸n --------------------
+# -------------------- visualización --------------------
 t = st.session_state.hr_data["t"]; x = st.session_state.hr_data["x"]
 y = st.session_state.hr_data["y"]; z = st.session_state.hr_data["z"]
 
 stride = max(1, int(np.ceil(len(t)/max_points))) if (downsample and len(t)>max_points) else 1
 t_d, x_d, y_d, z_d = t[::stride], x[::stride], y[::stride], z[::stride]
 
-st.subheader("Se帽ales")
+st.subheader("Se?ales")
 step_f = float(p["dt"])*stride
 
-
+# Ventana por defecto que NO empieza en 0 (p. ej., últimos 6000)
 VENTANA_DEF = 6000.0
 t1_def = float(t_d[-1])
 t0_def = max(float(t_d[0]), t1_def - VENTANA_DEF)
@@ -248,7 +249,7 @@ t0, t1 = st.slider(
     "Ventana temporal",
     min_value=float(t_d[0]),
     max_value=float(t_d[-1]),
-    value=(t0_def, t1_def),   # 鈫?ya no arranca en 0
+    value=(t0_def, t1_def),   # no arranca en 0
     step=step_f,
     key=f"win_{_sig(p)}"
 )
@@ -258,7 +259,7 @@ tt, xx, yy, zz = t_d[sel], x_d[sel], y_d[sel], z_d[sel]
 
 fig = go.Figure()
 fig.update_layout(template="plotly_dark", height=380, margin=dict(l=40,r=20,t=40,b=40),
-                  title=f"{st.session_state.hr_variant} 鈥?x(t)")
+                  title=f"{st.session_state.hr_variant} — x(t)")
 fig.add_trace(go.Scattergl(x=tt, y=xx, name="x(t)", mode="lines", line=dict(width=1.2)))
 if show_y: fig.add_trace(go.Scattergl(x=tt, y=yy, name="y(t)", mode="lines", line=dict(width=1)))
 if show_z: fig.add_trace(go.Scattergl(x=tt, y=zz, name="z(t)", mode="lines", line=dict(width=1)))
@@ -287,16 +288,20 @@ if show_phase_xy or show_phase_xz:
     if show_phase_xy:
         fig_xy = go.Figure()
         fig_xy.update_layout(template="plotly_dark", height=360, margin=dict(l=40,r=20,t=30,b=40))
-        fig_xy.add_trace(go.Scattergl(x=x_d, y=y_d, mode="lines", line=dict(width=1), name="x鈥搚"))
+        fig_xy.add_trace(go.Scattergl(x=x_d, y=y_d, mode="lines", line=dict(width=1), name="x–y"))
         fig_xy.update_xaxes(title="x"); fig_xy.update_yaxes(title="y")
         cols[0].plotly_chart(fig_xy, use_container_width=True, theme=None)
     if show_phase_xz:
         fig_xz = go.Figure()
         fig_xz.update_layout(template="plotly_dark", height=360, margin=dict(l=40,r=20,t=30,b=40))
-        fig_xz.add_trace(go.Scattergl(x=x_d, y=z_d, mode="lines", line=dict(width=1), name="x鈥搝"))
+        fig_xz.add_trace(go.Scattergl(x=x_d, y=z_d, mode="lines", line=dict(width=1), name="x–z"))
         fig_xz.update_xaxes(title="x"); fig_xz.update_yaxes(title="z")
         (cols[1] if show_phase_xy else cols[0]).plotly_chart(fig_xz, use_container_width=True, theme=None)
 
-# exporta a otros m贸dulos (IDS)
-st.session_state["hr_timeseries"] = dict(t=t, x=x, y=y, z=z,
-    variant=st.session_state.hr_variant, params=st.session_state.hr_params, method=st.session_state.hr_method)
+# exporta a otros módulos (IDS)
+st.session_state["hr_timeseries"] = dict(
+    t=t, x=x, y=y, z=z,
+    variant=st.session_state.hr_variant,
+    params=st.session_state.hr_params,
+    method=st.session_state.hr_method
+)
