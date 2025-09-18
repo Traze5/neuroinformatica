@@ -1,37 +1,32 @@
 cff-version: 1.2.0
-message: "Si utilizas este software, cítalo con la referencia siguiente: Calderon, M. (2025). neuroinformatica: simulación neuronal e IDS en Streamlit 
-[Software]. Zenodo. https://doi.org/10.5281/zenodo.17012606"
+message: "Si utilizas este software, cítalo con la referencia siguiente:"
 title: "neuroinformatica: simulación neuronal e IDS en Streamlit"
 version: 0.1.0
 date-released: 2025-08-31
+
 authors:
+  - family-names: "Calderón Pazmiño"
+    given-names: "Miguel Angel"
+    orcid: "https://orcid.org/0009-0007-0441-6133"
 
-name: "Miguel Calderón"
-repository-code: "https://github.com/Traze5/neuroinformatica
-"
+repository-code: "https://github.com/Traze5/neuroinformatica"
 license: "MIT"
+
 identifiers:
+  - type: doi
+    value: "10.5281/zenodo.17012606"
 
-type: doi
-value: "10.5281/zenodo.17012606"
 abstract: >
-Herramienta cloud para simulación y visualización de actividad neuronal
-(Hindmarsh–Rose, Rulkov, HH, Izhikevich) con extracción de IDS de HR, panel
-Streamlit y empaquetado reproducible (Docker).
+  Herramienta cloud para simulación y visualización de actividad neuronal
+  (Hindmarsh–Rose, Rulkov, HH, Izhikevich) con extracción de IDS de HR, panel
+  Streamlit y empaquetado reproducible (Docker).
+
 keywords:
-
-computational neuroscience
-
-Streamlit
-
-Hodgkin–Huxley
-
-Izhikevich
-
-Hindmarsh–Rose
-
-Rulkov
-
-IDS
-
-FAIR
+  - computational neuroscience
+  - Streamlit
+  - Hodgkin–Huxley
+  - Izhikevich
+  - Hindmarsh–Rose
+  - Rulkov
+  - IDS
+  - FAIR
